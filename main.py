@@ -33,7 +33,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 33
+BUILD_VERSION = 34
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -1089,13 +1089,34 @@ class Reader(QWidget):
         if path:
             self.open_path(path)
 
-    def open_path(self, path: str):
+    def open_path(self, path: str, quiet: bool = False):
+        """打开一本书。quiet=True 时解析失败不弹窗（启动自动恢复用）。"""
         try:
             book = book_parser.load_book(path)
         except Exception as e:
-            QMessageBox.warning(self, "打不开", f"{Path(path).name}\n\n{e}")
+            if not quiet:
+                QMessageBox.warning(self, "打不开", f"{Path(path).name}\n\n{e}")
             return
         self.set_book(book)
+
+    def _restore_last_book(self):
+        """启动时接着上次读的地方。
+
+        文件被删或者换了盘符就安静停在空状态：这时候用户什么都没做，
+        弹一个错误框只会让人莫名其妙。
+        """
+        if self.book is not None:      # 命令行已经指定了文件，优先
+            return
+        bid = self.st.last_book()
+        if not bid:
+            return
+        rec = self.st.find_book(bid)
+        if not rec:
+            return
+        path = rec.get("path") or ""
+        if not path or not os.path.exists(path):
+            return
+        self.open_path(path, quiet=True)
 
     def set_book(self, book: book_parser.Book):
         if not book or not getattr(book, "chapters", None):
@@ -1113,6 +1134,7 @@ class Reader(QWidget):
         idx = max(0, min(idx, len(book.chapters) - 1))
         self.load_chapter(idx, ratio=float(prog.get("ratio", 0.0) or 0.0))
         self._refresh_actions()
+        self.st.set_last_book(self.book_id)
 
     def load_chapter(self, idx: int, ratio: float = 0.0, at_offset: int | None = None):
         if not self.book or not self.book.chapters:
@@ -1547,9 +1569,16 @@ class Reader(QWidget):
             return
         if self.speech.running:
             if self.speech.paused:
-                vis = self._visible_sentence_index()
-                # 暂停期间可能滚到别处了：位置变了就从新位置重起，否则就地继续
-                if vis != self.speech.current_index:
+                # 一行模式下文档里只有当前这一句，按视口算出来恒为 0，
+                # 会和 current_index 比对失败，被当成「位置变了」从头重开。
+                # 那种情况直接用当前句索引，位置不可能变。
+                vis = (self._one_line_idx if self._one_line
+                       else self._visible_sentence_index())
+                # 暂停期间可能滚到别处了：位置变了就从新位置重起，否则就地继续。
+                # 容差一句：朗读时 _scroll_to_char 会把当前句滚到视口里，
+                # 而这里是按视口顶部算的，当前句稍靠下时会算成上一句，
+                # 不设容差的话「原地继续」也会往回退一句。
+                if abs(vis - self.speech.current_index) > 1:
                     self._start_speech(vis)
                 else:
                     self.speech.resume()
@@ -1563,7 +1592,10 @@ class Reader(QWidget):
         if not self.book or not self._tts_sentences:
             return
         if from_idx is None:
-            from_idx = self._visible_sentence_index()
+            # 一行模式下按视口算起点同样是 0，会从章首念起；
+            # 应该从当前显示的那句开始
+            from_idx = (self._one_line_idx if self._one_line
+                        else self._visible_sentence_index())
         self._clear_selection()
         voice = self.st.get("tts.voice", "")
         if voice:
@@ -1828,7 +1860,8 @@ class Reader(QWidget):
         pos = anchor[0] if anchor else 0
         offset = max(0, pos - self._tts_base)
         _title, body = self._chapter_parts(self.book.chapters[self.chapter_idx])
-        preview = body[offset:offset + 60].strip()
+        # 压成单行再存：书签常落在段落交界，正文里的 \n 会带进预览
+        preview = " ".join(body[offset:offset + 60].split())
         self.st.add_bookmark(self.book_id, self.chapter_idx, offset, preview)
         self._set_hint("已添加书签", 1600)
 
@@ -2196,6 +2229,10 @@ def main():
         if os.path.exists(arg):
             win.open_path(arg)
             break
+
+    # 没指定文件就接着上次读。用 singleShot(0) 让窗口先画出来，
+    # EPUB/PDF 解析要几百毫秒，直接调会让启动看着卡一下
+    QTimer.singleShot(0, win._restore_last_book)
 
     return app.exec()
 

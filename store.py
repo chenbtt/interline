@@ -142,6 +142,8 @@ class Store:
         self.library = _read_json(self._library_path, {"books": []})
         if not isinstance(self.library.get("books"), list):
             self.library = {"books": []}
+        # 旧文件没有这个键，补空：启动时据此决定要不要接着上次读
+        self.library.setdefault("last_book", "")
         self.marks = _read_json(self._marks_path, {})
         if not isinstance(self.marks, dict):
             self.marks = {}
@@ -239,6 +241,20 @@ class Store:
         b["opened"] = int(time.time())
         b["missing"] = not Path(path).exists()
         self.save_library()
+
+    def set_last_book(self, book_id: str) -> None:
+        """记住最后读的是哪本，下次启动接着打开。
+
+        记在打开时而不是关闭时：点 × 只是隐藏窗口，进程还在，
+        走不到任何关闭流程，那样记就漏了。
+        """
+        if self.library.get("last_book") != book_id:
+            self.library["last_book"] = book_id
+            self.save_library()
+
+    def last_book(self) -> str:
+        v = self.library.get("last_book")
+        return v if isinstance(v, str) else ""
 
     def set_progress(self, book_id: str, chapter: int, offset: int, ratio: float) -> None:
         b = self.find_book(book_id)

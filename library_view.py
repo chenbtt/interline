@@ -24,6 +24,10 @@ ROW_H = 50
 CARD_W, CARD_H = 130, 164   # 含卡片之间的间距，560 宽窗口一排能放 4 张
 ALIGN_LEFT_MID = (Qt.AlignmentFlag.AlignLeft.value
                   | Qt.AlignmentFlag.AlignVCenter.value)
+# 必须带 TextSingleLine：不带这个 flag 时 drawText 会把字符串里的 \n
+# 当硬换行排成两行，撑出条目矩形压到下一行去
+ALIGN_LEFT_MID_SINGLE = (ALIGN_LEFT_MID
+                         | Qt.TextFlag.TextSingleLine.value)
 ALIGN_CENTER = Qt.AlignmentFlag.AlignCenter.value
 
 
@@ -82,7 +86,7 @@ class RowDelegate(QStyledItemDelegate):
         title = rec.get("title") or "未命名"
         tr = QRectF(r.left() + 12, r.top() + 7, r.width() - 24, 20)
         fm = QFontMetrics(f_title)
-        p.drawText(tr, ALIGN_LEFT_MID,
+        p.drawText(tr, ALIGN_LEFT_MID_SINGLE,
                    fm.elidedText(title, Qt.TextElideMode.ElideRight, int(tr.width())))
 
         f_sub = QFont(opt.font)
@@ -93,9 +97,10 @@ class RowDelegate(QStyledItemDelegate):
         sc.setAlpha(int(190 * fade))
         p.setPen(sc)
         sub = rec.get("sub") or ""
-        sr = QRectF(r.left() + 12, r.top() + 28, r.width() - 24, 15)
         fm2 = QFontMetrics(f_sub)
-        p.drawText(sr, ALIGN_LEFT_MID,
+        # 高度按实际行高走：8.5pt 中文行高约 16px，写死 15 会裁掉一点
+        sr = QRectF(r.left() + 12, r.top() + 27, r.width() - 24, fm2.height())
+        p.drawText(sr, ALIGN_LEFT_MID_SINGLE,
                    fm2.elidedText(sub, Qt.TextElideMode.ElideRight, int(sr.width())))
 
 
@@ -334,7 +339,8 @@ class LibraryView(QWidget):
                 title = getattr(chapters[ci], "title", "") or f"第 {ci + 1} 节"
             else:
                 title = f"第 {ci + 1} 节"
-            preview = (m.get("preview") or "").strip()
+            # 旧数据里 preview 可能带着段落换行，这里统一压成单行
+            preview = " ".join((m.get("preview") or "").split())
             self.list.addItem(self._mark_item({
                 "mode": "marks",
                 "title": title,
