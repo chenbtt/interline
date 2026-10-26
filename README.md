@@ -50,8 +50,11 @@
 Qt TextToSpeech 的 `winrt` 后端，用系统自带音色，离线可用，不用另装语音包。按句读，读到哪句高亮哪句；选中一段可以直接「从这里开始读」。语速和音色在「听」按钮的右键菜单里调，语速五档（0.8 倍到 2.0 倍），音色从系统已安装的语音里挑。进度精确到句。
 
 <p align="center">
-  <img src="screenshots/tts.png" width="400" alt="朗读高亮">
-  <img src="screenshots/tts-menu.png" width="380" alt="语速与音色菜单">
+  <img src="screenshots/tts-over-code.png" width="420" alt="浮在代码上朗读，右键调语速和音色">
+</p>
+
+<p align="center">
+  <img src="screenshots/tts-over-term.png" width="520" alt="浮在终端上阅读">
 </p>
 
 **书库与标注**
