@@ -1,11 +1,15 @@
 """把一段文字按句念出来。
 
-两个 API 细节（和 Qt C++ 文档不一致，踩过坑）：
-- PyQt6 里 `say(text)` **不接受 id**，`enqueue(text)` 才返回 id
-- 所以句索引是靠 enqueue 的返回值建立映射，sayingWord 回调拿这个 id 反查
+**别用 enqueue 排队**（踩过的坑）：
+winrt 后端其实没有队列。连塞两句进去，它只读最后一句，而且 sayingWord
+回调里的 uid 永远停在 0——返回的 id 和回调里的 uid 对不上。原来的「预取下一句」
+策略因此会把正在读的句子顶掉，句索引卡在第一句不动，高亮也就不走了。
 
-队列策略：一次只挂一句缓冲。第一句 enqueue 后引擎空闲会立刻读，
-等 sayingWord 报告进入这句时再把下一句 enqueue 进去，既不吞也不断。
+现在的做法：一次只 `say()` 一句，等 stateChanged 变成 Ready 再念下一句。
+sayingWord 只用来驱动词级高亮，不看 uid，因为引擎里始终只有一句。
+
+另外：`say()` 在 PyQt6 里不接受 id，只有 `enqueue` 返回 id，这也是上面那条
+映射思路失效的原因之一。
 
 引擎必须显式指定 winrt：默认构造在某些机器上会落到 mock（无声）。
 winrt 提供 Huihui / Yaoyao / Kangkang 三个中文音色。
@@ -53,7 +57,7 @@ class SpeechReader(QObject):
         self._idx = -1        # 正在读的句子
         self._next = 0        # 下一句待入队
         self._running = False
-        self._id_map: dict[int, int] = {}   # enqueue 返回的 id -> 句子索引
+        self._id_map: dict[int, int] = {}   # 留作兼容，队列策略已弃用
         self._speaker.stateChanged.connect(self._on_state)
         self._speaker.sayingWord.connect(self._on_word)
 
@@ -101,16 +105,18 @@ class SpeechReader(QObject):
         self._idx = -1
         self._next = max(0, min(from_idx, len(self._sentences) - 1))
         self._running = True
-        self._enqueue_next()
+        self._say_next()
 
-    def _enqueue_next(self) -> None:
-        """把下一句挂进队列。引擎空闲时会立刻开始读，所以这里不用区分首次。"""
+    def _say_next(self) -> None:
+        """念下一句。引擎里始终只放一句，读完靠 stateChanged 回调续上。"""
         if not self._running or self._next >= len(self._sentences):
             return
         idx = self._next
         self._next += 1
-        uid = self._speaker.enqueue(self._sentences[idx])
-        self._id_map[uid] = idx
+        self._idx = idx
+        # 立刻通知，不等 sayingWord：引擎从说话到报第一个词有几百毫秒延迟
+        self.sentence_changed.emit(idx)
+        self._speaker.say(self._sentences[idx])
 
     def pause(self) -> None:
         if self._running:
@@ -132,7 +138,7 @@ class SpeechReader(QObject):
             pass
 
     def skip(self, delta: int) -> None:
-        """跳句。清空队列，从目标句重新往下读。"""
+        """跳句。从目标句重新往下读。"""
         if not self._running:
             return
         target = max(0, min(self._idx + delta, len(self._sentences) - 1))
@@ -140,10 +146,8 @@ class SpeechReader(QObject):
             self._speaker.stop(QTextToSpeech.BoundaryHint.Immediate)
         except Exception:
             pass
-        self._id_map.clear()
-        self._idx = -1
         self._next = target
-        self._enqueue_next()
+        self._say_next()
 
     def _finish(self) -> None:
         self._running = False
@@ -152,19 +156,15 @@ class SpeechReader(QObject):
 
     # -------------------------------------------------- 回调
 
-    def _on_word(self, _word, uid, start, length):
-        idx = self._id_map.get(uid)
-        if idx is None:
+    def _on_word(self, _word, _uid, start, length):
+        # 不看 uid：winrt 后端报的 uid 恒定是 0，用它反查会永远命中第一句。
+        # 引擎里始终只有一句在播，当前句索引就是 self._idx。
+        if self._idx < 0 or self._idx >= len(self._sentences):
             return
-        # 进入新句子：通知 UI，并立刻预取下一句
-        if idx != self._idx:
-            self._idx = idx
-            self.sentence_changed.emit(idx)
-            self._enqueue_next()
-        text = self._sentences[idx]
+        text = self._sentences[self._idx]
         i = utf16_to_index(text, start)
         n = utf16_to_index(text, start + length) - i
-        self.word_spoken.emit(idx, i, max(1, n))
+        self.word_spoken.emit(self._idx, i, max(1, n))
 
     def _on_state(self, state):
         if state == QTextToSpeech.State.Speaking:
@@ -175,11 +175,11 @@ class SpeechReader(QObject):
             if not self._running:
                 self.state_changed.emit("ready")
                 return
-            # 队列空了但还有句子没读：说明预取没成功，兜底补一句
+            # 这一句念完了：还有就接着念，没有了就收尾
             if self._next >= len(self._sentences):
                 self._finish()
             else:
-                self._enqueue_next()
+                self._say_next()
         elif state == QTextToSpeech.State.Error:
             self._running = False
             self.state_changed.emit("error")

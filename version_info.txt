@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(32, 0, 0, 0),
-    prodvers=(32, 0, 0, 0),
+    filevers=(33, 0, 0, 0),
+    prodvers=(33, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,9 +16,9 @@ VSVersionInfo(
       StringTable(
         '040904b0',
         [StringStruct('FileDescription', 'Interline Text Layout'),
-         StringStruct('FileVersion', '32.0.0.0'),
+         StringStruct('FileVersion', '33.0.0.0'),
          StringStruct('ProductName', 'Interline'),
-         StringStruct('ProductVersion', '32.0.0.0'),
+         StringStruct('ProductVersion', '33.0.0.0'),
          StringStruct('OriginalFilename', 'Interline.exe')])
       ]),
     VarFileInfo([VarStruct('Translation', [0x0409, 0x04b0])])
