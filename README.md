@@ -16,7 +16,7 @@
 所以它只照顾这一种用法。一个不占地方的小窗口，浮在别的程序上面，透到能看见底下的代码，读完了按一下就没了。
 
 <p align="center">
-  <img src="screenshots/read.png" width="440" alt="阅读界面">
+  <img src="screenshots/over-term.png" width="560" alt="浮在终端窗口上阅读">
 </p>
 
 ## 功能
@@ -51,10 +51,6 @@ Qt TextToSpeech 的 `winrt` 后端，用系统自带音色，离线可用，不�
 
 <p align="center">
   <img src="screenshots/tts-over-code.png" width="420" alt="浮在代码上朗读，右键调语速和音色">
-</p>
-
-<p align="center">
-  <img src="screenshots/tts-over-term.png" width="520" alt="浮在终端上阅读">
 </p>
 
 **书库与标注**
