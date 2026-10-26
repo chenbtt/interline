@@ -29,7 +29,11 @@
 - 始终置顶（可关），整窗透明度 0.15–1.0，底板不透明度单独可调——文字保持清晰，只有背景变透
 - 四套皮肤：墨蓝 / 纯黑 / 暖褐 / 纸白，`F10` 轮换
 - 字号 10–40 px（滑动条上写多少，屏幕上就是多少像素）、行距、字体族都能调
-- 托盘常驻，关窗不退出；重复启动只把已有窗口叫到前面，不会开出第二个
+- 托盘常驻，点 × 只是收起窗口，退出走托盘菜单；重复启动只把已有窗口叫到前面，不会开出第二个
+
+<p align="center">
+  <img src="screenshots/skin-paper.png" width="360" alt="纸白皮肤">
+</p>
 
 **一行模式（`F9`）**
 
@@ -76,7 +80,9 @@ Qt TextToSpeech 的 `winrt` 后端，系统自带音色，不需要联网也不�
 
 ## 下载即用
 
-去 [Releases](../../releases) 下 `Interline.exe`，双击就行。单文件绿色版，不写注册表、不加启动项、不生成日志。
+如果 [Releases](/releases) 里有现成的 `Interline.exe`，直接下下来双击就行。没有的话，按下面的「打包」自己生成一个，逻辑一样。
+
+单文件绿色版，不写注册表、不加启动项、不生成日志。
 
 数据默认在 `%LOCALAPPDATA%\Interline\`：
 
@@ -106,6 +112,23 @@ marks.json     书签与高亮
 <p align="center">
   <img src="screenshots/settings-keys.png" width="520" alt="快捷键设置">
 </p>
+
+## 代码在哪
+
+纯 Python，约 4800 行，除了 PyQt6 只有一个 pdfminer 依赖。
+
+| 文件 | 负责 |
+| --- | --- |
+| `main.py` | 窗口、背景自绘、翻页与渲染主流程、听书、交互 |
+| `book_parser.py` | TXT / EPUB / HTML / PDF 解析与切章 |
+| `library_view.py` | 书库卡片/列表视图、目录与书签面板 |
+| `settings_dialog.py` | 设置窗口（外观 / 快捷键 / 朗读 / 关于） |
+| `store.py` | 三个 JSON 的读写、默认值合并、旧版字号迁移 |
+| `theme.py` | 皮肤定义与浅色底下的颜色派生 |
+| `tts.py` | 逐句朗读队列与逐词高亮回调 |
+| `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
+| `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
+| `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑
 
@@ -139,7 +162,7 @@ python -m PyInstaller Interline.spec --noconfirm
 - **文件改名或移动后，书签和高亮会失联。** 书的 id 是路径的 hash，有意为之（同一本书换个盘符就该当新书）。想支持「重新定位」得连带迁移 `marks` 记录。
 - **PDF 是重排文本，不是原版版式。** 表格、多栏、图文混排的 PDF 效果会很差，扫描件更不行（没有 OCR）。
 - **一行模式只跟着句子走**，适合偷看两眼，不适合整章速读。
-- **没有云同步、没有导出、没有加密。** 这些都在"明确不做"的清单里。
+- **没有云同步、没有导出、没有加密。** 这些都在「明确不做」的清单里。
 
 ## License
 
