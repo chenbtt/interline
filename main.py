@@ -33,7 +33,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 26
+BUILD_VERSION = 32
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -356,6 +356,8 @@ class Reader(QWidget):
         self._build_ui()
         self._apply_theme()
         self._restore_window()
+        # 启动时还没书，先把用不上的按钮收起来
+        self._refresh_actions()
 
     # -------------------------------------------------- 窗口
 
@@ -608,6 +610,12 @@ class Reader(QWidget):
         self.search_count.setStyleSheet(f"color:{dim};font-size:11.5px;")
 
     def eventFilter(self, obj, ev):
+        # 空界面时正文上点一下就是「打开书」，否则这里点了毫无反应
+        if (self.book is None and obj is self.view.viewport()
+                and ev.type() == QEvent.Type.MouseButtonPress
+                and ev.button() == Qt.MouseButton.LeftButton):
+            self.pick_file()
+            return True
         # 单行模式里 header 藏了，整个窗口只剩 QTextEdit。它会把左键吃掉
         # （用于选文本），事件传不到 Reader，窗口就拖不动了。这里接过来。
         # 但只在顶部窄条上生效——文字区域点了就拖，误触太频繁。
@@ -715,6 +723,22 @@ class Reader(QWidget):
 
     # -------------------------------------------------- 视图切换
 
+    def _refresh_actions(self):
+        """按「有没有书」刷新按钮。
+
+        没打开书时，目录/书签/听/单行按了也没反应，直接不显示，
+        免得看着像坏了。打开/书库和字号任何时候都在。
+        """
+        is_read = self.mode == "read"
+        has_book = self.book is not None
+        self.btn_open.setVisible(is_read)
+        self.btn_lib.setVisible(is_read)
+        self.btn_font.setVisible(is_read)
+        self.btn_toc.setVisible(is_read and has_book)
+        self.btn_marks.setVisible(is_read and has_book)
+        self.btn_speak.setVisible(is_read and has_book)
+        self.btn_oneline.setVisible(is_read and has_book)
+
     def set_mode(self, mode: str):
         if mode == self.mode:
             return
@@ -725,14 +749,10 @@ class Reader(QWidget):
         self.mode = mode
         is_read = mode == "read"
         self.stack.setCurrentIndex(0 if is_read else 1)
-        for b in self._read_btns:
-            b.setVisible(is_read)
+        self._refresh_actions()
         self.btn_back.setVisible(not is_read)
         self.btn_add.setVisible(mode == "books")
         self.title_label.setVisible(is_read)
-        self.btn_speak.setVisible(is_read)
-        self.btn_font.setVisible(is_read)
-        self.btn_oneline.setVisible(is_read)
         self.view_btn.setVisible(mode == "books")
         self._sync_view_btn()
 
@@ -1092,6 +1112,7 @@ class Reader(QWidget):
         idx = int(prog.get("chapter", 0) or 0)
         idx = max(0, min(idx, len(book.chapters) - 1))
         self.load_chapter(idx, ratio=float(prog.get("ratio", 0.0) or 0.0))
+        self._refresh_actions()
 
     def load_chapter(self, idx: int, ratio: float = 0.0, at_offset: int | None = None):
         if not self.book or not self.book.chapters:
