@@ -1,0 +1,26 @@
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(26, 0, 0, 0),
+    prodvers=(26, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+    ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        '040904b0',
+        [StringStruct('FileDescription', 'Interline Text Layout'),
+         StringStruct('FileVersion', '26.0.0.0'),
+         StringStruct('ProductName', 'Interline'),
+         StringStruct('ProductVersion', '26.0.0.0'),
+         StringStruct('OriginalFilename', 'Interline.exe')])
+      ]),
+    VarFileInfo([VarStruct('Translation', [0x0409, 0x04b0])])
+  ]
+)

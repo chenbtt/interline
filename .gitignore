@@ -1,0 +1,22 @@
+# 构建产物
+build/
+dist/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时数据（--portable / INTERLINE_DATA_DIR 指向这里时）
+InterlineData/
+
+# 开发期截图草稿（screenshots/ 里的正式图要保留）
+preview_*.png
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
