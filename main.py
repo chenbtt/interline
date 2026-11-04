@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
@@ -33,7 +34,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 34
+BUILD_VERSION = 38
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -314,6 +315,9 @@ class Reader(QWidget):
         self._tts_sentences: list[str] = []
         self._tts_offsets: list[int] = []   # 每句在章节正文里的起始字符
         self._tts_base = 0                  # 正文在文档里的起点（标题长度 + 换行）
+        self._speech_pos = -1               # 上次停下时念到第几句
+        self._speech_char = 0               # 那一句里念到第几个字
+        self._speech_paused = False         # 是被「停」下来的，不是自然读完
 
         # 高亮分两层维护：朗读和搜索各记各的，合并后一次性交给 QTextEdit，
         # 否则两边都调 setExtraSelections 会互相清掉
@@ -1142,6 +1146,10 @@ class Reader(QWidget):
         # 换章必须停朗读，否则会继续念上一章的内容
         if self.speech.running:
             self._stop_speech()
+        # 暂停状态切章也要清：否则点「续」会拿上一章的句子号在这章里念
+        self._speech_paused = False
+        self._speech_pos = -1
+        self._speech_char = 0
         idx = max(0, min(idx, len(self.book.chapters) - 1))
         ch = self.book.chapters[idx]
         self.chapter_idx = idx
@@ -1568,27 +1576,27 @@ class Reader(QWidget):
         if not self.book or not self._tts_sentences:
             return
         if self.speech.running:
-            if self.speech.paused:
-                # 一行模式下文档里只有当前这一句，按视口算出来恒为 0，
-                # 会和 current_index 比对失败，被当成「位置变了」从头重开。
-                # 那种情况直接用当前句索引，位置不可能变。
-                vis = (self._one_line_idx if self._one_line
-                       else self._visible_sentence_index())
-                # 暂停期间可能滚到别处了：位置变了就从新位置重起，否则就地继续。
-                # 容差一句：朗读时 _scroll_to_char 会把当前句滚到视口里，
-                # 而这里是按视口顶部算的，当前句稍靠下时会算成上一句，
-                # 不设容差的话「原地继续」也会往回退一句。
-                if abs(vis - self.speech.current_index) > 1:
-                    self._start_speech(vis)
-                else:
-                    self.speech.resume()
-                    self.btn_speak.setText("停")
-            else:
-                self.speech.pause()
+            # 「停」：记住念到哪个词，然后把引擎真正停掉。
+            #
+            # 不用 pause()/resume()：实测 winrt 上 resume() 完全不出声
+            # （状态会变回 Speaking，但没有声音、也没有逐词回调），
+            # 连 1 秒的短暂停都恢复不了。只能停掉、之后从那个词重新开口。
+            self._speech_pos, self._speech_char = self.speech.stop_at()
+            self._speech_paused = True
+            self.speech.stop()
+            self._clear_highlight()
+            self.btn_speak.setText("续")
         else:
-            self._start_speech()
+            if self._speech_paused and self._speech_pos >= 0:
+                # 「续」：从停下的那个词接上。先换个新引擎——
+                # 挂久了旧实例连 say 都是哑的，重建只要几十毫秒
+                self.speech.rebuild()
+                self._start_speech(self._speech_pos, self._speech_char)
+            else:
+                self._start_speech()
+            self._speech_paused = False
 
-    def _start_speech(self, from_idx: int | None = None):
+    def _start_speech(self, from_idx: int | None = None, from_char: int = 0):
         if not self.book or not self._tts_sentences:
             return
         if from_idx is None:
@@ -1601,7 +1609,9 @@ class Reader(QWidget):
         if voice:
             self.speech.set_voice(voice)
         self.speech.set_rate(float(self.st.get("tts.rate", 0.0)))
-        self.speech.start(self._tts_sentences, from_idx)
+        self.speech.start(self._tts_sentences, from_idx, from_char)
+        self._speech_pos = from_idx
+        self._speech_char = from_char
         self.btn_speak.setText("停")
         # 不等 sayingWord：引擎报第一个词要几百毫秒，
         # 期间旧高亮还挂在上一句上。先把目标句点亮，点击即有反馈。
@@ -1613,6 +1623,9 @@ class Reader(QWidget):
     def _stop_speech(self):
         self.speech.stop()
         self._clear_highlight()
+        self._speech_pos = -1
+        self._speech_char = 0
+        self._speech_paused = False
         self.btn_speak.setText("听")
 
     def _on_sentence(self, idx: int):

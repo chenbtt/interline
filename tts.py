@@ -57,6 +57,10 @@ class SpeechReader(QObject):
         self._idx = -1        # 正在读的句子
         self._next = 0        # 下一句待入队
         self._running = False
+        self._paused = False
+        self._start_idx = 0
+        self._start_char = 0
+        self._last_word_start = 0
         self._id_map: dict[int, int] = {}   # 留作兼容，队列策略已弃用
         self._speaker.stateChanged.connect(self._on_state)
         self._speaker.sayingWord.connect(self._on_word)
@@ -83,6 +87,37 @@ class SpeechReader(QObject):
     def set_volume(self, vol: float) -> None:
         self._speaker.setVolume(max(0.0, min(1.0, vol)))
 
+    def stop_at(self) -> tuple[int, int]:
+        """返回 (句索引, 句内 UTF-16 偏移)，用于之后从这里接着念。
+
+        必须在 stop() 之前调用。winrt 的 pause/resume 不可用
+        （resume 后状态是 Speaking 但不出声也不吐词），所以暂停一律做成
+        「记住念到哪个词 → 停掉 → 之后从那个词重新开口」。
+        """
+        return max(0, self._idx), max(0, self._last_word_start)
+
+    def rebuild(self) -> None:
+        """换一个新的底层引擎。
+
+        挂久了 winrt 的会话会僵死：resume() 不出声，连 say() 也哑掉，
+        状态却看着正常。这种情况只能丢掉旧的 QTextToSpeech 重新建一个。
+        调用前先把 running 之类清干净，重建后由调用方重新 start()。
+        """
+        self.stop()
+        old = self._speaker
+        try:
+            old.stateChanged.disconnect()
+            old.sayingWord.disconnect()
+        except Exception:
+            pass
+        try:
+            old.deleteLater()
+        except Exception:
+            pass
+        self._speaker = QTextToSpeech(ENGINE)
+        self._speaker.stateChanged.connect(self._on_state)
+        self._speaker.sayingWord.connect(self._on_word)
+
     # -------------------------------------------------- 播放
 
     @property
@@ -91,19 +126,31 @@ class SpeechReader(QObject):
 
     @property
     def paused(self) -> bool:
-        return self._speaker.state() == QTextToSpeech.State.Paused
+        # 用自己记的标志，不问引擎：挂久了 winrt 的状态会漂成 Ready/Error，
+        # 按 state()==Paused 判断会失灵，调用方就走进「再暂停一次」的分支
+        return self._paused
 
     @property
     def current_index(self) -> int:
         return self._idx
 
-    def start(self, sentences: list[str], from_idx: int = 0) -> None:
+    def start(self, sentences: list[str], from_idx: int = 0,
+              from_char: int = 0) -> None:
+        """从第 from_idx 句的第 from_char 个字符开始念。
+
+        from_char 是 UTF-16 码元偏移，用来实现「从停下的那个词接着说」。
+        首句会按它截断，之后各句都完整。
+        """
         self.stop()
         self._sentences = [s for s in sentences if s.strip()]
         if not self._sentences:
             return
         self._idx = -1
+        self._paused = False
         self._next = max(0, min(from_idx, len(self._sentences) - 1))
+        self._start_idx = self._next
+        self._start_char = max(0, from_char)
+        self._last_word_start = 0
         self._running = True
         self._say_next()
 
@@ -114,21 +161,30 @@ class SpeechReader(QObject):
         idx = self._next
         self._next += 1
         self._idx = idx
+        self._last_word_start = 0
         # 立刻通知，不等 sayingWord：引擎从说话到报第一个词有几百毫秒延迟
         self.sentence_changed.emit(idx)
-        self._speaker.say(self._sentences[idx])
+        text = self._sentences[idx]
+        if idx == self._start_idx and self._start_char:
+            # 首句从上次停下的那个词接上
+            cut = utf16_to_index(text, self._start_char)
+            text = text[cut:]
+        self._speaker.say(text)
 
     def pause(self) -> None:
         if self._running:
+            self._paused = True
             # 默认 hint 要等到句子边界才停，按下去半天没反应；要 Immediately
             self._speaker.pause(QTextToSpeech.BoundaryHint.Immediate)
 
     def resume(self) -> None:
         if self._running:
+            self._paused = False
             self._speaker.resume()
 
     def stop(self) -> None:
         self._running = False
+        self._paused = False
         self._idx = -1
         self._next = 0
         self._id_map.clear()
@@ -151,6 +207,7 @@ class SpeechReader(QObject):
 
     def _finish(self) -> None:
         self._running = False
+        self._paused = False
         self.state_changed.emit("ready")
         self.finished.emit()
 
@@ -162,9 +219,16 @@ class SpeechReader(QObject):
         if self._idx < 0 or self._idx >= len(self._sentences):
             return
         text = self._sentences[self._idx]
-        i = utf16_to_index(text, start)
-        n = utf16_to_index(text, start + length) - i
-        self.word_spoken.emit(self._idx, i, max(1, n))
+        # 首句可能被截断过，词偏移是相对截断后的文本，要补回原句里
+        base = 0
+        if self._idx == self._start_idx and self._start_char:
+            base = utf16_to_index(text, self._start_char)
+        i = base + utf16_to_index(text[base:], start)
+        n = utf16_to_index(text[base:], start + length)
+        n = max(1, n - (i - base))
+        # 记下当前念到哪个词，暂停时据此从这里接着念
+        self._last_word_start = i
+        self.word_spoken.emit(self._idx, i, n)
 
     def _on_state(self, state):
         if state == QTextToSpeech.State.Speaking:
@@ -174,6 +238,10 @@ class SpeechReader(QObject):
         elif state == QTextToSpeech.State.Ready:
             if not self._running:
                 self.state_changed.emit("ready")
+                return
+            # 暂停中引擎偶尔也会报 Ready（挂久了状态会漂），
+            # 这时候往下续读等于绕过用户的暂停，不能动
+            if self._paused:
                 return
             # 这一句念完了：还有就接着念，没有了就收尾
             if self._next >= len(self._sentences):
