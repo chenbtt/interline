@@ -248,18 +248,31 @@ def build_script(new_exe: Path, target: Path) -> str:
     运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。用 ping 代替
     timeout 等待：cmd 以无窗口方式启动时没有控制台，timeout 会直接报错。
     重试上限 40 次（约 80 秒），避免进程一直不退时脚本死循环。
+
+    两个必须处理的坑：
+    1. 用 move 而不是 copy：同卷是重命名，瞬间完成，不会留下写了一半的 exe；
+    2. PyInstaller onefile 把文件解压到 %TEMP%\\_MEIxxxxxx 再加载 python3xx.dll，
+       目录名按秒级种子生成。更新完立刻启动，新旧进程可能撞上同一个目录名，
+       旧进程退出时正在删它 —— 新进程就会报「Failed to load Python DLL」。
+       所以给新进程单独指一个 TEMP，和旧进程彻底隔开。
     """
     return f"""@echo off
-ping 127.0.0.1 -n 3 >nul
+setlocal
+ping 127.0.0.1 -n 4 >nul
 set /a n=0
 :retry
-copy /y "{new_exe}" "{target}" >nul 2>&1
-if not errorlevel 1 goto done
+if exist "{target}.old" del /q "{target}.old" >nul 2>&1
+move /y "{target}" "{target}.old" >nul 2>&1
+move /y "{new_exe}" "{target}" >nul 2>&1
+if exist "{target}" goto done
 set /a n+=1
 if %n% geq 40 exit /b 1
 ping 127.0.0.1 -n 2 >nul
 goto retry
 :done
+set "TEMP=%LOCALAPPDATA%\\Interline\\run"
+set "TMP=%TEMP%"
+if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1
 start "" "{target}"
 del "%~f0"
 """
