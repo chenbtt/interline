@@ -9,6 +9,19 @@ import re
 _src = open("main.py", encoding="utf-8").read()
 _bv = re.search(r"^BUILD_VERSION\s*=\s*(\d+)", _src, re.M).group(1)
 
+# 奶蛙素材。逐条列，不用通配：PyInstaller 的 datas 不展开 glob。
+# 运行时路径由 assets.resource_path() 按 sys._MEIPASS 解析。
+_NAIWA = "assets/naiwa"
+_PET_DATAS = [
+    (f"{_NAIWA}/sheet.png", _NAIWA),
+    (f"{_NAIWA}/manifest.json", _NAIWA),
+    (f"{_NAIWA}/sfx/laugh.mp3", f"{_NAIWA}/sfx"),
+    (f"{_NAIWA}/sfx/voice_01.mp3", f"{_NAIWA}/sfx"),
+    (f"{_NAIWA}/sfx/voice_02.mp3", f"{_NAIWA}/sfx"),
+    (f"{_NAIWA}/sfx/voice_03.mp3", f"{_NAIWA}/sfx"),
+    (f"{_NAIWA}/sfx/voice_04.mp3", f"{_NAIWA}/sfx"),
+]
+
 # 版本资源：右键属性、任务管理器里显示的就是这里的英文名
 _VERSION_INFO = f'''# UTF-8
 VSVersionInfo(
@@ -44,7 +57,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_PET_DATAS,
     # QtTextToSpeech 是延迟导入的，静态分析抓不到；
     # QtMultimedia 是 texttospeech 插件的隐藏依赖（音频输出链路）
     hiddenimports=[

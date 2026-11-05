@@ -5,16 +5,49 @@
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence
-from PyQt6.QtMultimedia import QMediaDevices
-from PyQt6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-                             QKeySequenceEdit, QListWidget, QListWidgetItem,
-                             QMessageBox, QPushButton, QSlider, QStackedWidget,
-                             QVBoxLayout, QWidget)
+from pathlib import Path
 
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtMultimedia import QMediaDevices
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
+                             QLabel, QKeySequenceEdit, QListWidget,
+                             QListWidgetItem, QMessageBox, QPushButton, QSlider,
+                             QStackedWidget, QVBoxLayout, QWidget)
+
+import pet
 import theme
 from theme import KEY_DEFAULTS, KEY_LABELS, SKIN_NAMES, SKIN_ORDER, SKINS
+
+
+def _check_png(st) -> str:
+    """画一张 13px 的勾号图给 QSS 用，缓存在数据目录。
+
+    QSS 的 ::indicator 只能改背景和边框，画不出勾——纯色块的观感像
+    「禁用」而不是「已选」，所以补一张小图。画不出来就返回空，退回纯色块。
+    """
+    path = Path(st.dir) / "ui_check13.png"
+    if path.exists():
+        return str(path).replace("\\", "/")
+    try:
+        pm = QPixmap(13, 13)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(244, 250, 254))
+        pen.setWidthF(1.9)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawPolyline(QPolygonF([QPointF(2.4, 6.9),
+                                  QPointF(5.3, 9.8),
+                                  QPointF(10.8, 3.2)]))
+        p.end()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pm.save(str(path), "PNG")
+    except Exception:
+        return ""
+    return str(path).replace("\\", "/")
 
 
 class SettingsDialog(QDialog):
@@ -49,6 +82,7 @@ class SettingsDialog(QDialog):
             ("外观", self._page_look()),
             ("快捷键", self._page_keys()),
             ("朗读", self._page_tts()),
+            ("奶蛙", self._page_pet()),
             ("关于", self._page_about()),
         ):
             self.nav.addItem(QListWidgetItem(title))
@@ -353,6 +387,126 @@ class SettingsDialog(QDialog):
         self.st.save_config()
         self.reader.speech.set_rate(rate)
 
+    # -------------------------------------------------- 奶蛙
+
+    def _page_pet(self):
+        w, lay = self._page("奶蛙")
+
+        lay.addWidget(self._section("奶读模式"))
+        hint = QLabel(
+            "开启后整个阅读器变成奶蛙，头顶浮出当前这句的气泡，朗读、翻句、书签照旧。\n"
+            "点奶蛙 = 摸一下（捧腹大笑）；点气泡 = 开始/停止朗读；"
+            "滚轮 = 上/下一句；拖到哪儿就待在哪儿。", w)
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_pet_try = QPushButton("进入奶读模式", w)
+        self.btn_pet_try.setObjectName("actBtn")
+        self.btn_pet_try.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pet_try.clicked.connect(self._toggle_pet)
+        row.addWidget(self.btn_pet_try)
+        self.btn_pet_sound = QPushButton("试听笑声", w)
+        self.btn_pet_sound.setObjectName("actBtn")
+        self.btn_pet_sound.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pet_sound.clicked.connect(self._preview_laugh)
+        row.addWidget(self.btn_pet_sound)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addSpacing(10)
+
+        lay.addWidget(self._section("奶蛙大小"))
+        scale = int(round(float(self.st.get("pet.scale", 0.9)) * 100))
+        self.pet_scale_slider = self._slider(60, 160, scale)
+        self.pet_scale_label = QLabel(f"{scale}%", w)
+        self.pet_scale_slider.valueChanged.connect(self._on_pet_scale)
+        lay.addLayout(self._slider_row(self.pet_scale_slider, self.pet_scale_label))
+        lay.addSpacing(10)
+
+        lay.addWidget(self._section("气泡宽度"))
+        bw = int(self.st.get("pet.bubble_w", 360))
+        self.pet_bw_slider = self._slider(200, 560, bw)
+        self.pet_bw_label = QLabel(f"{bw}px", w)
+        self.pet_bw_slider.valueChanged.connect(self._on_pet_bubble_w)
+        lay.addLayout(self._slider_row(self.pet_bw_slider, self.pet_bw_label))
+        lay.addSpacing(10)
+
+        lay.addWidget(self._section("音效"))
+        self.pet_sound_cb = QCheckBox("摸奶蛙、打招呼时出声", w)
+        self.pet_sound_cb.setChecked(bool(self.st.get("pet.sound", True)))
+        self.pet_sound_cb.toggled.connect(self._on_pet_sound)
+        lay.addWidget(self.pet_sound_cb)
+
+        self.pet_duck_cb = QCheckBox("出声时把朗读音量压低，两个声音不打架", w)
+        self.pet_duck_cb.setChecked(bool(self.st.get("pet.duck", True)))
+        self.pet_duck_cb.toggled.connect(self._on_pet_duck)
+        lay.addWidget(self.pet_duck_cb)
+
+        self.pet_idle_cb = QCheckBox("闲置两分钟自己嘀咕一句（默认关）", w)
+        self.pet_idle_cb.setChecked(bool(self.st.get("pet.idle_voice", False)))
+        self.pet_idle_cb.toggled.connect(self._on_pet_idle)
+        lay.addWidget(self.pet_idle_cb)
+
+        vol = int(round(float(self.st.get("pet.sound_volume", 0.7)) * 100))
+        self.pet_vol_slider = self._slider(0, 100, vol)
+        self.pet_vol_label = QLabel(f"{vol}%", w)
+        self.pet_vol_slider.valueChanged.connect(self._on_pet_volume)
+        lay.addSpacing(8)
+        lay.addWidget(self._section("音效音量"))
+        lay.addLayout(self._slider_row(self.pet_vol_slider, self.pet_vol_label))
+
+        lay.addStretch(1)
+        return w
+
+    def _toggle_pet(self):
+        self.reader.toggle_pet()
+        self.btn_pet_try.setText(
+            "退出奶读模式" if self.reader._pet else "进入奶读模式")
+
+    def _preview_laugh(self):
+        r = self.reader
+        if r._pet:
+            r._pet_fx(pet.JUMPING)     # 已经在奶读模式：直接摸它
+        else:
+            r.preview_pet_sound()      # 没进模式：只放声音
+
+    def _on_pet_scale(self, value: int):
+        self.pet_scale_label.setText(f"{value}%")
+        self.st.set("pet.scale", value / 100.0)
+        self.st.save_config()
+        r = self.reader
+        r._pet_sprite.set_scale(value / 100.0)
+        if r._pet:
+            r._pet_relayout()
+            r.update()
+
+    def _on_pet_bubble_w(self, value: int):
+        self.pet_bw_label.setText(f"{value}px")
+        self.st.set("pet.bubble_w", value)
+        self.st.save_config()
+        if self.reader._pet:
+            self.reader._pet_relayout()
+            self.reader.update()
+
+    def _on_pet_sound(self, on: bool):
+        self.st.set("pet.sound", bool(on))
+        self.st.save_config()
+
+    def _on_pet_duck(self, on: bool):
+        self.st.set("pet.duck", bool(on))
+        self.st.save_config()
+
+    def _on_pet_idle(self, on: bool):
+        self.st.set("pet.idle_voice", bool(on))
+        self.st.save_config()
+
+    def _on_pet_volume(self, value: int):
+        self.pet_vol_label.setText(f"{value}%")
+        self.st.set("pet.sound_volume", value / 100.0)
+        self.st.save_config()
+
     # -------------------------------------------------- 关于
 
     def _page_about(self):
@@ -368,7 +522,9 @@ class SettingsDialog(QDialog):
         boss = self.reader.boss_key or "（未注册）"
         for text in (f"老板键：{boss}",
                      f"数据目录：{self.st.dir}",
-                     "支持格式：txt / md / epub / html / pdf"):
+                     "支持格式：txt / md / epub / html / pdf",
+                     "奶蛙精灵图：timerring/codex-pet-naiwa（MIT）",
+                     "奶蛙音效：naiwa-pet（仅供学习交流，请勿商用）"):
             lb = QLabel(text, w)
             lb.setObjectName("hint")
             lb.setWordWrap(True)
@@ -387,6 +543,9 @@ class SettingsDialog(QDialog):
         dim = theme.dim_text(self.st, "mid")
         faint = theme.dim_text(self.st, "faint")
         menu_bg, menu_border, _menu_fg, menu_sel = theme.menu_colors(self.st)
+        # QSS 的 indicator 只能填色、画不出勾，所以给一张 13px 的小图
+        _png = _check_png(self.st)
+        check_rule = f'image: url("{_png}");' if _png else ""
         self.setStyleSheet(f"""
             QDialog {{ background: {bg}; }}
             QListWidget#nav {{
@@ -437,6 +596,22 @@ class SettingsDialog(QDialog):
                 background: #8fa8bb; border-radius: 6px;
             }}
             QSlider::handle:horizontal:hover {{ background: #b6cad8; }}
+            QCheckBox {{ color: {fg}; font-size: 12.5px; spacing: 8px; }}
+            QCheckBox::indicator {{
+                width: 13px; height: 13px; border-radius: 3px;
+                border: 1px solid rgba({ov},.30); background: transparent;
+            }}
+            QCheckBox::indicator:hover {{ border-color: rgba(95,143,168,.7); }}
+            QCheckBox::indicator:checked {{
+                background: #6f9fbc; border-color: #a9c8db;
+                {check_rule}
+            }}
+            QPushButton#actBtn {{
+                background: rgba({ov},.08); color: {fg};
+                border: 1px solid rgba({ov},.16); border-radius: 5px;
+                padding: 6px 14px; font-size: 12.5px;
+            }}
+            QPushButton#actBtn:hover {{ border-color: rgba(95,143,168,.6); }}
         """)
         self.setWindowOpacity(1.0)
 

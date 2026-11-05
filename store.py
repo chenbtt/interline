@@ -31,6 +31,7 @@ DEFAULT_KEYS = {
     "prev_chapter": "Left",
     "toggle_play": "F5",
     "toggle_oneline": "F9",
+    "toggle_pet": "F8",
     "toggle_skin": "F10",
     "add_bookmark": "Ctrl+D",
     "add_highlight": "Ctrl+H",
@@ -61,6 +62,11 @@ DEFAULT_CONFIG = {
     "bg_alpha": 236,        # 面板背景 alpha, 0-255
     "window_opacity": 1.0,  # 整体透明度, 0.15-1.0
     "one_line": {"cols": 20},
+    # 奶读模式：整个窗口变成奶蛙，头顶挂一个聊天气泡
+    "pet": {"on": False, "scale": 0.9, "bubble_w": 360,
+            "show_bubble": True, "x": None, "y": None,
+            "sound": True, "sound_volume": 0.7, "duck": True,
+            "idle_voice": False},
     "library": {"view": "card"},   # card | list，书库列表的展示方式
     # voice_id 形如 "sys:Microsoft Huihui Desktop" / "edge:zh-CN-XiaoxiaoNeural"
     # 空 = 系统默认语音（离线）。voice 是老版本的纯系统语音名，保留兼容。

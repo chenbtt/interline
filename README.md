@@ -41,6 +41,25 @@
   <img src="screenshots/one-line.png" width="560" alt="一行模式">
 </p>
 
+**奶读模式（`F8`）**
+
+窗口整个变成一只奶蛙，头顶浮出当前这句的聊天气泡。它还是同一个窗口、同一份阅读进度，只是换了副长相——朗读、翻句、加书签都照旧，所以可以一边听一边看它动。
+
+九个动作接的是真状态，不是装饰：朗读时原地小跑，暂停时站着等，一句读完抬头看一眼，翻句朝对应的方向跑两步（`running-left` / `running-right`），加书签原地跳一下，读失败就愣住，闲置久了发呆。
+
+- 点奶蛙 = 摸它一下，它会捧腹大笑并放出笑声
+- 点气泡 = 开始 / 停止朗读
+- 滚轮 = 上一句 / 下一句，拖动 = 挪位置（拖的时候朝反方向跑，位置记在 `pet.x/y`）
+- 右键 = 隐藏气泡、打开文件、进设置、退出奶读模式
+- 笑声、打招呼的嘀咕、闲置时的自言自语可以单独关；出声时朗读音量自动压到 40%，不抢拍
+
+气泡宽度、奶蛙大小、音量都在设置里调。退出奶读模式会回到原来的窗口尺寸和位置，不会留下一个 350 像素的窗口。
+
+<p align="center">
+  <img src="screenshots/pet-mode.png" width="420" alt="奶读模式">
+  <img src="screenshots/settings-pet.png" width="420" alt="奶蛙设置">
+</p>
+
 **老板键（`Ctrl+Alt+D`）**
 
 走 Win32 的 `RegisterHotKey`，焦点在别的程序里也能按。键位被占用会自动换候选，设置页标出实际生效的那个。小键盘上的符号键同样有效。
@@ -93,7 +112,7 @@
 数据在 `%LOCALAPPDATA%\Interline\`：
 
 ```
-config.json    窗口位置、字体、皮肤、快捷键、朗读设置
+config.json    窗口位置、字体、皮肤、快捷键、朗读设置、奶蛙开关与位置
 library.json   书库与阅读进度
 marks.json     书签
 tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
@@ -109,9 +128,10 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | 向上滚一屏 | `Shift+Space` | | 目录 | `Ctrl+T` |
 | 朗读开关 | `F5` | | 搜索 | `Ctrl+F` |
 | 一行模式 | `F9` | | 书库 | `Ctrl+L` |
-| 切换皮肤 | `F10` | | 老板键（全局） | `Ctrl+Alt+D` |
+| 奶读模式 | `F8` | | 老板键（全局） | `Ctrl+Alt+D` |
+| 切换皮肤 | `F10` | | | |
 
-头两项是正文区自带的滚动，改不了。其余七项可以在设置里改（右键菜单 → 设置…），按下新组合键即时生效，清空则恢复默认。切换章节走目录，或者把正文滚到底。
+头两项是正文区自带的滚动，改不了。其余八项可以在设置里改（右键菜单 → 设置…），按下新组合键即时生效，清空则恢复默认。切换章节走目录，或者把正文滚到底。
 
 <p align="center">
   <img src="screenshots/settings-keys.png" width="520" alt="快捷键设置">
@@ -126,7 +146,10 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `main.py` | 窗口、背景自绘、翻页与渲染主流程、听书、交互 |
 | `book_parser.py` | TXT / EPUB / HTML / PDF 解析与切章 |
 | `library_view.py` | 书库卡片/列表视图、目录与书签面板 |
-| `settings_dialog.py` | 设置窗口（外观 / 快捷键 / 朗读 / 关于） |
+| `settings_dialog.py` | 设置窗口（外观 / 快捷键 / 朗读 / 奶蛙 / 关于） |
+| `pet.py` | 奶蛙精灵表切帧、三层动画状态机、气泡排版与绘制 |
+| `pet_audio.py` | 奶蛙音效播放器（独立于朗读的 QMediaPlayer） |
+| `assets.py` | 打包后的资源路径解析（`sys._MEIPASS`） |
 | `store.py` | 三个 JSON 的读写、默认值合并、旧版字号迁移 |
 | `theme.py` | 皮肤定义与浅色底下的颜色派生 |
 | `speech_controller.py` | 双引擎控制器：音色选择、失败降级、停/续状态机 |
@@ -134,6 +157,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `edge_speech.py` | 在线音色：MP3 合成缓存、并发预取、播放与词边界 |
 | `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
+| `make_pet_sheet.py` | 下载奶蛙素材、切行校对、生成 `sheet.png` 与 `manifest.json` |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑
@@ -141,7 +165,8 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 ```bash
 pip install -r requirements.txt
 python main.py                 # 正常启动
-python main.py --selftest      # 检查 Qt / 解析层 / TTS 引擎是否可用
+python main.py --selftest      # 检查 Qt / 解析层 / 奶蛙素材 / TTS 引擎是否可用
+python main.py --petcheck      # 奶蛙切帧与绘制冒烟，导出一张合成图
 python main.py --pdfcheck a.pdf # 只跑 PDF 解析，把结果打到临时文件
 ```
 
@@ -158,7 +183,9 @@ pip install pyinstaller
 python -m PyInstaller Interline.spec --noconfirm
 ```
 
-产物是 `dist/Interline.exe`，约 60 MB。没开 UPX：单文件包本来就 deflate 过，UPX 只能再省一成左右，代价是每次启动多一层解压，还容易被杀软当成可疑程序。spec 里另外剔掉了 ffmpeg 解码后端和 `opengl32sw.dll`，合计 35 MB 上下，纯文字阅读用不到。
+产物是 `dist/Interline.exe`，约 65 MB。没开 UPX：单文件包本来就 deflate 过，UPX 只能再省一成左右，代价是每次启动多一层解压，还容易被杀软当成可疑程序。spec 里另外剔掉了 ffmpeg 解码后端和 `opengl32sw.dll`，合计 35 MB 上下，纯文字阅读用不到。
+
+奶蛙的 `sheet.png`（2 MB）和 5 个 mp3 由 `Interline.spec` 的 `datas` 逐条列出打进包，运行时用 `assets.resource_path()` 按 `sys._MEIPASS` 找回来。`datas` 不展开通配符，加素材要手动补一行；漏了不会崩，只会退化成空窗口，所以 `--selftest` 专门有一条查素材。
 
 版本号只有一处：`main.py` 的 `BUILD_VERSION`，打包时由 spec 写进 exe 产品版本，运行时再从 exe 属性读回来。
 
@@ -169,7 +196,14 @@ python -m PyInstaller Interline.spec --noconfirm
 - **文件改名或移动，书签会失联。** 书的 id 是路径的 hash，换个盘符就当新书了。要做「重新定位」得连带迁移 `marks` 记录
 - **PDF 出来的是重排文本，不是原版版式。** 表格、多栏、图文混排的 PDF 效果很差，扫描件直接读不出字
 - **一行模式只跟着句子走**，适合瞄两眼，不适合整章快读
+- **奶蛙只用了 9 组动作。** 精灵图里还有两行 16 方向注视，没接——那属于「眼睛跟着鼠标转」的路子，和现在的状态机不是一套，硬接进来只会两边都不像
 - **没有云同步、导出、加密。**
+
+## 致谢
+
+- 奶蛙精灵图：[timerring/codex-pet-naiwa](https://github.com/timerring/codex-pet-naiwa)（MIT）。`make_pet_sheet.py` 把它切成单帧入库，`jumping` 那一行自带的白色地面阴影改成了低透明度黑色，否则投在深色桌面上会发白光
+- 奶蛙音效：同项目附带的 `naiwa-pet` 语音包，仅供学习交流，**请勿商用**。要发布正式版请自行替换或去掉 `assets/naiwa/sfx/`
+- 在线音色：[edge-tts](https://github.com/rany2/edge-tts)（LGPL-3.0）
 
 ## License
 
