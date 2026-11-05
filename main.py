@@ -30,11 +30,12 @@ import settings_dialog
 import store
 import theme
 import tts
+import speech_controller
 from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 38
+BUILD_VERSION = 40
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -310,8 +311,8 @@ class Reader(QWidget):
         self._wheel_save_timer.setInterval(300)
         self._wheel_save_timer.timeout.connect(self.st.save_config)
 
-        # 听书
-        self.speech = tts.SpeechReader(self)
+        # 听书：双引擎控制器，对外接口和原来的 SpeechReader 一致
+        self.speech = speech_controller.SpeechController(self, st)
         self._tts_sentences: list[str] = []
         self._tts_offsets: list[int] = []   # 每句在章节正文里的起始字符
         self._tts_base = 0                  # 正文在文档里的起点（标题长度 + 换行）
@@ -564,6 +565,7 @@ class Reader(QWidget):
         self.speech.sentence_changed.connect(self._on_sentence)
         self.speech.finished.connect(self._on_speech_finished)
         self.speech.state_changed.connect(self._on_speech_state)
+        self.speech.notice.connect(lambda s: self._set_hint(s, 4000))
 
         # 搜索
         self.search_input.textChanged.connect(
@@ -1605,10 +1607,9 @@ class Reader(QWidget):
             from_idx = (self._one_line_idx if self._one_line
                         else self._visible_sentence_index())
         self._clear_selection()
-        voice = self.st.get("tts.voice", "")
-        if voice:
-            self.speech.set_voice(voice)
-        self.speech.set_rate(float(self.st.get("tts.rate", 0.0)))
+        # 每次点听都重读音色/语速/音量：设置里改完立即生效，
+        # 在线音色连不上时控制器会在这次朗读里自动切回系统语音
+        self.speech.apply_config()
         self.speech.start(self._tts_sentences, from_idx, from_char)
         self._speech_pos = from_idx
         self._speech_char = from_char
@@ -1698,12 +1699,23 @@ class Reader(QWidget):
             act.setChecked(abs(cur_rate - rate) < 0.01)
             act.triggered.connect(lambda _c=False, r=rate: self._set_rate(r))
         menu.addSeparator()
-        cur_voice = self.st.get("tts.voice", "") or self.speech.current_voice()
-        for name in self.speech.available_voices():
-            act = menu.addAction(name)
+        # 音色放子菜单，系统语音和在线音色同列，和设置窗口共用一份清单
+        voice_menu = menu.addMenu("音色")
+        cur_voice = self.st.get("tts.voice_id", "") or self.speech.current_voice()
+        last_group = None
+        for label, vid, group in self.speech.voice_choices():
+            if group != last_group:
+                if last_group is not None:
+                    voice_menu.addSeparator()
+                title = voice_menu.addAction(
+                    "系统语音" if group == "sys" else "在线音色")
+                title.setEnabled(False)
+                last_group = group
+            text = label if group == "sys" else "在线 · " + label
+            act = voice_menu.addAction(text)
             act.setCheckable(True)
-            act.setChecked(name == cur_voice)
-            act.triggered.connect(lambda _c=False, n=name: self._set_voice(n))
+            act.setChecked(vid == cur_voice)
+            act.triggered.connect(lambda _c=False, v=vid: self._set_voice(v))
         menu.exec(self.btn_speak.mapToGlobal(pos))
 
     def _set_rate(self, rate: float):
@@ -1711,10 +1723,10 @@ class Reader(QWidget):
         self.st.save_config()
         self.speech.set_rate(rate)
 
-    def _set_voice(self, name: str):
-        self.st.set("tts.voice", name)
+    def _set_voice(self, voice_id: str):
+        self.st.set("tts.voice_id", voice_id)
         self.st.save_config()
-        self.speech.set_voice(name)
+        self.speech.set_voice(voice_id)
 
     def _on_chapter_loaded(self, idx: int, err: str) -> None:
         # 解析期间用户可能已经翻走了，旧结果直接作废
@@ -2129,6 +2141,10 @@ def selftest() -> int:
         except Exception as e:
             log(f"tts FAIL  = {type(e).__name__}: {e}")
 
+        # 别在这里构造 Reader 验证主窗口：打包版 selftest 没有消息循环，
+        # 而且上面已经建过一个 QTextToSpeech，构造主窗口会触发 Qt 层
+        # 原生崩溃（0xC0000409），连日志都写不出来。主窗口由 UI 冒烟测试覆盖。
+
         # PDF 是延迟导入的，这里确认打包时真的把它收进去了
         try:
             import pdfminer
@@ -2136,6 +2152,16 @@ def selftest() -> int:
         except Exception as e:
             log(f"pdfminer FAIL = {type(e).__name__}: {e}")
             rc = 2
+
+        # 在线音色：确认 edge_tts 和它的 aiohttp/certifi 依赖链都打进包了
+        try:
+            import edge_tts
+            import aiohttp
+            from PyQt6.QtMultimedia import QMediaPlayer
+            log(f"edge-tts  = {getattr(edge_tts, '__version__', '?')} "
+                f"/ aiohttp {aiohttp.__version__} / QMediaPlayer ok")
+        except Exception as e:
+            log(f"edge-tts FAIL = {type(e).__name__}: {e}")
         log("RESULT    = OK")
     except Exception as e:
         import traceback
@@ -2144,6 +2170,63 @@ def selftest() -> int:
         rc = 1
 
     out = Path(tempfile.gettempdir()) / "interline_selftest.txt"
+    try:
+        out.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+    return rc
+
+
+def edgecheck() -> int:
+    """打包后验证在线音色整条链路：联网合成 → MP3 解码 → 逐句播放。
+
+    spec 里剔掉了 ffmpeg 后端，只留 WMF；这个自检用来确认正式 exe
+    真的能播 MP3，而不只是「import 得到模块」。
+    """
+    import tempfile
+
+    lines: list[str] = []
+    rc = 0
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+
+    def log(msg: str):
+        lines.append(str(msg))
+
+    try:
+        import aiohttp
+        import edge_tts
+        import edge_speech
+        from PyQt6.QtMultimedia import QMediaDevices, QMediaPlayer
+        log(f"edge-tts  = {getattr(edge_tts, '__version__', '?')} "
+            f"/ aiohttp {aiohttp.__version__}")
+        log(f"audio out = {[d.description() for d in QMediaDevices.audioOutputs()]}")
+
+        hits = {"sentences": [], "words": 0, "finished": False, "err": ""}
+        eng = edge_speech.EdgeEngine()
+        eng.set_volume(0.01)       # 几乎听不见；别设 0，Qt 静音时时钟可能不推进
+        eng.sentence_changed.connect(lambda i: hits["sentences"].append(i))
+        eng.word_spoken.connect(lambda *a: hits.update(words=hits["words"] + 1))
+        eng.finished.connect(lambda: (hits.update(finished=True), app.quit()))
+        eng.failed.connect(lambda e: (hits.update(err=e), app.quit()))
+        eng.start(["打包后的在线音色自检，第一句。",
+                   "这是第二句，用来确认逐句接着念。"], 0, 0)
+        QTimer.singleShot(25000, app.quit)
+        app.exec()
+        eng.stop()
+        log(f"sentences = {hits['sentences']}")
+        log(f"words     = {hits['words']}")
+        log(f"finished  = {hits['finished']}")
+        log(f"error     = {hits['err']}")
+        if not hits["finished"] or hits["err"]:
+            rc = 2
+        log("RESULT    = OK" if rc == 0 else "RESULT    = FAIL")
+    except Exception:
+        import traceback
+        log("RESULT    = FAIL")
+        log(traceback.format_exc())
+        rc = 1
+
+    out = Path(tempfile.gettempdir()) / "interline_edgecheck.txt"
     try:
         out.write_text("\n".join(lines), encoding="utf-8")
     except Exception:
@@ -2189,6 +2272,8 @@ def pdfcheck(path: str) -> int:
 def main():
     if "--selftest" in sys.argv:
         return selftest()
+    if "--edgecheck" in sys.argv:
+        return edgecheck()
     if "--pdfcheck" in sys.argv:
         i = sys.argv.index("--pdfcheck")
         target = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""

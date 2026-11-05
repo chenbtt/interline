@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
+from PyQt6.QtMultimedia import QMediaDevices
 from PyQt6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                              QKeySequenceEdit, QListWidget, QListWidgetItem,
                              QMessageBox, QPushButton, QSlider, QStackedWidget,
@@ -264,15 +265,61 @@ class SettingsDialog(QDialog):
         w, lay = self._page("朗读")
 
         lay.addWidget(self._section("音色"))
+        hint = QLabel("系统语音离线可用；在线音色音质更自然，需要联网，"
+                      "连不上时这一次会自动切回系统语音。", w)
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
         self.voice_box = QComboBox(w)
-        for v in self.reader.speech.available_voices():
-            self.voice_box.addItem(v)
-        cur_voice = self.st.get("tts.voice", "") or self.reader.speech.current_voice()
-        idx = self.voice_box.findText(cur_voice)
-        if idx >= 0:
-            self.voice_box.setCurrentIndex(idx)
-        self.voice_box.currentTextChanged.connect(self._on_voice)
+        last_group = None
+        for label, vid, group in self.reader.speech.voice_choices():
+            if group != last_group:
+                if last_group is not None:
+                    self.voice_box.insertSeparator(self.voice_box.count())
+                last_group = group
+            text = label if group == "sys" else "在线 · " + label
+            self.voice_box.addItem(text, vid)   # itemData 存 voice_id
+        cur = self.reader.speech.current_voice()
+        idx = self.voice_box.findData(cur)
+        if idx < 0 and cur:
+            idx = self.voice_box.findData("sys:" + cur)  # 老配置不带前缀
+        self.voice_box.setCurrentIndex(max(0, idx))
+        # 先设好再连信号：打开设置不该因为初始化就重启正在进行的朗读
+        self.voice_box.currentIndexChanged.connect(self._on_voice)
         lay.addWidget(self.voice_box)
+
+        if self.reader.speech.edge_available:
+            note = QLabel("在线音色由 edge-tts（LGPL-3.0）提供，"
+                          "走微软 Edge 的在线服务。", w)
+            note.setObjectName("hint")
+        else:
+            note = QLabel("在线音色组件未加载，当前只有系统语音。", w)
+            note.setObjectName("warn")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addSpacing(10)
+
+        lay.addWidget(self._section("输出设备（在线音色）"))
+        try:
+            default_dev = QMediaDevices.defaultAudioOutput().description()
+        except Exception:
+            default_dev = "?"
+        dev_hint = QLabel(
+            f"在线音色走 Qt 的音频输出，当前系统默认是「{default_dev}」。"
+            "默认设备是没连上的蓝牙耳机时，音频照常播放但你听不到；"
+            "手动选一个正在用的扬声器即可。系统语音不受这一项影响。", w)
+        dev_hint.setObjectName("hint")
+        dev_hint.setWordWrap(True)
+        lay.addWidget(dev_hint)
+        self.dev_box = QComboBox(w)
+        for value, label in self.reader.speech.output_devices():
+            self.dev_box.addItem(label, value)
+        cur_dev = self.st.get("tts.output_device", "") or ""
+        idx = self.dev_box.findData(cur_dev)
+        self.dev_box.setCurrentIndex(max(0, idx))
+        self.dev_box.currentIndexChanged.connect(self._on_output_device)
+        lay.addWidget(self.dev_box)
         lay.addSpacing(10)
 
         lay.addWidget(self._section("语速"))
@@ -285,10 +332,19 @@ class SettingsDialog(QDialog):
         lay.addStretch(1)
         return w
 
-    def _on_voice(self, name: str):
-        self.st.set("tts.voice", name)
+    def _on_voice(self, index: int):
+        vid = self.voice_box.itemData(index)
+        if not vid:      # 分隔条
+            return
+        self.st.set("tts.voice_id", vid)
         self.st.save_config()
-        self.reader.speech.set_voice(name)
+        self.reader.speech.set_voice(vid)
+
+    def _on_output_device(self, index: int):
+        value = self.dev_box.itemData(index) or ""
+        self.st.set("tts.output_device", value)
+        self.st.save_config()
+        self.reader.speech.set_output_device(value)
 
     def _on_rate(self, value: int):
         rate = value / 100.0

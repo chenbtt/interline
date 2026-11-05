@@ -47,7 +47,9 @@
 
 **听书**
 
-Qt TextToSpeech 的 `winrt` 后端，用系统自带音色，离线可用，不用另装语音包。按句读，读到哪句高亮哪句；选中一段可以直接「从这里开始读」。语速和音色在「听」按钮的右键菜单里调，语速五档（0.8 倍到 2.0 倍），音色从系统已安装的语音里挑。进度精确到句。
+两套引擎，在设置里挑一个音色：**系统语音**（Qt TextToSpeech 的 `winrt` 后端，离线可用，**默认**）或 **在线音色**（Edge 神经语音，音质更自然，需要联网）。在线音色按句合成 MP3 并缓存，播当前句时后台预取下一句；连不上时这一次自动切回系统语音，不改设置。按句读，读到哪句高亮哪句；选中一段可以直接「从这里开始读」。语速五档（0.8 倍到 2.0 倍），在「听」按钮的右键菜单或设置里调。进度精确到句。
+
+在线音色由 [edge-tts](https://github.com/rany2/edge-tts)（LGPL-3.0）提供，走微软 Edge 的在线服务；这不是官方授权的接口，没有可用性保证，所以默认仍然是离线的系统语音。在线音色的音频走 Qt，默认跟随系统输出设备；如果系统默认是没连上的蓝牙耳机，在「设置 → 朗读 → 输出设备」里手动指定正在用的扬声器即可。
 
 <p align="center">
   <img src="screenshots/tts-over-code.png" width="420" alt="浮在代码上朗读，右键调语速和音色">
@@ -88,6 +90,7 @@ Qt TextToSpeech 的 `winrt` 后端，用系统自带音色，离线可用，不�
 config.json    窗口位置、字体、皮肤、快捷键、朗读设置
 library.json   书库与阅读进度
 marks.json     书签
+tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 ```
 
 想带着走就把 exe 放 U 盘，启动时加 `--portable`，数据改存到 exe 同级的 `InterlineData\`。
@@ -110,7 +113,7 @@ marks.json     书签
 
 ## 代码在哪
 
-纯 Python，约 4900 行，除了 PyQt6 只有 pdfminer 一个依赖。
+纯 Python。除 PyQt6 外有两个依赖：`pdfminer.six`（PDF 解析）和 `edge-tts`（在线音色，只在选它时才联网）。
 
 | 文件 | 负责 |
 | --- | --- |
@@ -120,7 +123,9 @@ marks.json     书签
 | `settings_dialog.py` | 设置窗口（外观 / 快捷键 / 朗读 / 关于） |
 | `store.py` | 三个 JSON 的读写、默认值合并、旧版字号迁移 |
 | `theme.py` | 皮肤定义与浅色底下的颜色派生 |
-| `tts.py` | 逐句朗读队列与逐词高亮回调 |
+| `speech_controller.py` | 双引擎控制器：音色选择、失败降级、停/续状态机 |
+| `tts.py` | 系统语音（winrt）逐句朗读与逐词回调 |
+| `edge_speech.py` | 在线音色：MP3 合成缓存、并发预取、播放与词边界 |
 | `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
 | `Interline.spec` | PyInstaller 打包配置 |
@@ -153,7 +158,8 @@ python -m PyInstaller Interline.spec --noconfirm
 
 ## 已知限制
 
-- **只有 Windows。** 老板键靠 Win32 的 `RegisterHotKey`，朗读用 `winrt` 后端，换平台这两块都跑不起来
+- **只有 Windows。** 老板键靠 Win32 的 `RegisterHotKey`，系统语音走 `winrt` 后端；在线音色本身跨平台，但整个程序换平台仍跑不起来
+- **在线音色依赖非官方接口。** 可能限流或临时不可用；失败会自动回落到系统语音，但要稳定离线使用就在设置里选系统音色
 - **文件改名或移动，书签会失联。** 书的 id 是路径的 hash，换个盘符就当新书了。要做「重新定位」得连带迁移 `marks` 记录
 - **PDF 出来的是重排文本，不是原版版式。** 表格、多栏、图文混排的 PDF 效果很差，扫描件直接读不出字
 - **一行模式只跟着句子走**，适合瞄两眼，不适合整章快读

@@ -50,6 +50,10 @@ a = Analysis(
     hiddenimports=[
         "PyQt6.QtTextToSpeech",
         "PyQt6.QtMultimedia",
+        # 在线音色：edge_tts 及其 aiohttp/certifi 依赖链由 PyInstaller hook 收集，
+        # 这里显式列入口模块，免得静态分析漏掉（实测最小探针 exe 可联网合成）
+        "edge_tts",
+        "edge_speech",
         # PDF 解析在函数里延迟导入，显式列出来免得漏收
         "pdfminer.high_level",
         "pdfminer.layout",

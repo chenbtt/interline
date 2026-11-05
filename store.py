@@ -62,7 +62,10 @@ DEFAULT_CONFIG = {
     "window_opacity": 1.0,  # 整体透明度, 0.15-1.0
     "one_line": {"cols": 20},
     "library": {"view": "card"},   # card | list，书库列表的展示方式
-    "tts": {"engine": "winrt", "voice": "", "rate": 0.0, "volume": 1.0},
+    # voice_id 形如 "sys:Microsoft Huihui Desktop" / "edge:zh-CN-XiaoxiaoNeural"
+    # 空 = 系统默认语音（离线）。voice 是老版本的纯系统语音名，保留兼容。
+    "tts": {"engine": "winrt", "voice": "", "voice_id": "",
+            "rate": 0.0, "volume": 1.0, "output_device": ""},
     "update": {"base_url": "", "check_minutes": 10, "auto": True},
     "keys": DEFAULT_KEYS,
 }
