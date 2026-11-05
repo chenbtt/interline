@@ -31,11 +31,13 @@ import store
 import theme
 import tts
 import speech_controller
+import update_dialog
+import updater
 from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 40
+BUILD_VERSION = 43
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -313,6 +315,19 @@ class Reader(QWidget):
 
         # 听书：双引擎控制器，对外接口和原来的 SpeechReader 一致
         self.speech = speech_controller.SpeechController(self, st)
+
+        # 在线更新：比对 GitHub 最新 Release，比当前版本新就挂 NEW 标
+        self._update_info = None
+        self._manual_check = False
+        self._updater = updater.Updater(self)
+        self._updater.checked.connect(self._on_update_checked)
+        self._update_timer = QTimer(self)
+        try:
+            minutes = int(st.get("update.check_minutes", 60) or 60)
+        except (TypeError, ValueError):
+            minutes = 60
+        self._update_timer.setInterval(max(10, minutes) * 60000)
+        self._update_timer.timeout.connect(self.check_updates)
         self._tts_sentences: list[str] = []
         self._tts_offsets: list[int] = []   # 每句在章节正文里的起始字符
         self._tts_base = 0                  # 正文在文档里的起点（标题长度 + 换行）
@@ -429,6 +444,17 @@ class Reader(QWidget):
         self.title_label = QLabel("行间")
         self.title_label.setObjectName("titleLabel")
         hl.addWidget(self.title_label)
+
+        # 有新版本时在书名右边挂个 NEW，点开看更新说明
+        self.new_badge = QPushButton("NEW")
+        self.new_badge.setObjectName("newBadge")
+        self.new_badge.setFixedHeight(16)
+        self.new_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.new_badge.setToolTip("有新版本，点击查看")
+        self.new_badge.setVisible(False)
+        self.new_badge.clicked.connect(self._open_update)
+        hl.addWidget(self.new_badge)
         hl.addStretch(1)
 
         # 顶栏只管书：打开 / 目录 / 书签 / 书库 / 关闭（书库态换成 ＋ 返回）
@@ -920,6 +946,12 @@ class Reader(QWidget):
             QLabel#titleLabel {{
                 color: {heading}; font-size: 12px; letter-spacing: .06em;
             }}
+            QPushButton#newBadge {{
+                background: #b04a4a; color: #ffffff; border: none;
+                border-radius: 3px; font-size: 9px; font-weight: 600;
+                padding: 0 5px 1px 5px; letter-spacing: .08em;
+            }}
+            QPushButton#newBadge:hover {{ background: #c95a5a; }}
             QPushButton#hdrBtn {{
                 background: transparent; border: none; color: {dim};
                 font-size: 12px; padding: 3px 7px; border-radius: 4px;
@@ -1728,6 +1760,40 @@ class Reader(QWidget):
         self.st.save_config()
         self.speech.set_voice(voice_id)
 
+    # -------------------------------------------------- 在线更新
+
+    def check_updates(self, manual: bool = False):
+        """比对 GitHub Release。manual=True 时无视配置、并给状态反馈。"""
+        if not manual and not self.st.get("update.auto", True):
+            return
+        repo = str(self.st.get("update.repo", "chenbtt/interline") or "")
+        if not repo:
+            return
+        self._manual_check = manual
+        if manual:
+            self._set_hint("正在检查更新…", 0)
+        self._updater.check(repo)
+
+    def _on_update_checked(self, ok: bool, info, err: str):
+        manual, self._manual_check = self._manual_check, False
+        newer = bool(ok and info
+                     and int(info.get("version") or 0) > BUILD_VERSION)
+        self._update_info = info if newer else None
+        badge = getattr(self, "new_badge", None)
+        if badge is not None:
+            badge.setVisible(newer)
+        if not manual:
+            return
+        if newer:
+            self._set_hint(f"发现新版本 {info.get('tag', '')}", 4000)
+        else:
+            self._set_hint("已是最新版本" if ok else f"检查失败：{err[:40]}", 5000)
+
+    def _open_update(self):
+        if not self._update_info:
+            return
+        update_dialog.UpdateDialog(self, self._update_info).exec()
+
     def _on_chapter_loaded(self, idx: int, err: str) -> None:
         # 解析期间用户可能已经翻走了，旧结果直接作废
         if idx != self.chapter_idx or not self._pending_chapter:
@@ -1814,6 +1880,16 @@ class Reader(QWidget):
     def _exit_one_line(self):
         if not self._one_line:
             return
+        # 一行模式把文档换成了单句、_tts_base 也被清成 0。退出时如果还用
+        # 进入前记的滚动比例，就会回到「切过去那一刻」，而不是现在读到哪。
+        # 所以以当前章节 + 当前句索引为准，换算成正文里的字符偏移再定位。
+        chapter = self.chapter_idx
+        idx = self._one_line_idx
+        was_running = self.speech.running
+        paused = (self._speech_pos, self._speech_char, self._speech_paused)
+        body_off = (self._tts_offsets[idx]
+                    if 0 <= idx < len(self._tts_offsets) else None)
+
         self._one_line = False
         # setFixedSize 会同时锁住 min/max，不解除的话下面的 setGeometry 无效
         self.setMinimumSize(320, 120)
@@ -1824,8 +1900,29 @@ class Reader(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         if self._normal_geo is not None:
             self.setGeometry(self._normal_geo)
-        chapter, ratio = self._one_line_pos
-        self.load_chapter(chapter, ratio=ratio)
+
+        if body_off is None or not self.book:
+            # 拿不到句子索引就退回进入时的位置，至少不会跳到章首
+            old_chapter, ratio = self._one_line_pos
+            self.load_chapter(old_chapter, ratio=ratio)
+            return
+
+        ch = self.book.chapters[chapter]
+        title, _body = self._chapter_parts(ch)
+        # at_offset 是文档内字符位置：标题 + 换行 + 正文偏移，
+        # 和 _build_tts_index 里的 _tts_base 算法一致
+        self.load_chapter(chapter, at_offset=len(title) + 1 + body_off)
+
+        loaded = getattr(ch, "loaded", True) is not False
+        if was_running and loaded:
+            # load_chapter 会停朗读；一行模式本来在读，切回来接着从这句念，
+            # 否则用户看到的是「进度对的、声音没了」
+            self._start_speech(idx)
+        elif paused[2] and paused[0] >= 0:
+            # 切过去之前是按了「停」的，保留续读点，别被 load_chapter 清掉
+            self._speech_pos, self._speech_char = paused[0], paused[1]
+            self._speech_paused = True
+            self.btn_speak.setText("续")
 
     def _paint_one_line(self, text: str | None = None):
         """一行模式下重排尺寸和文字。字号变了也要调一次。
@@ -2052,6 +2149,7 @@ class Reader(QWidget):
         act_settings.triggered.connect(self._open_settings)
         act_oneline = menu.addAction("一行模式")
         act_oneline.triggered.connect(self.toggle_one_line)
+        act_update = menu.addAction("检查更新")
         menu.addSeparator()
         act_top = menu.addAction("置顶")
         act_top.setCheckable(True)
@@ -2068,6 +2166,7 @@ class Reader(QWidget):
         act_toc.triggered.connect(self.toggle_toc)
         act_mark.triggered.connect(self._add_bookmark)
         act_top.triggered.connect(self.toggle_on_top)
+        act_update.triggered.connect(lambda: self.check_updates(True))
         act_hide.triggered.connect(self._hide_window)
         act_quit.triggered.connect(QApplication.instance().quit)
         menu.exec(self.view.viewport().mapToGlobal(pos))
@@ -2162,6 +2261,17 @@ def selftest() -> int:
                 f"/ aiohttp {aiohttp.__version__} / QMediaPlayer ok")
         except Exception as e:
             log(f"edge-tts FAIL = {type(e).__name__}: {e}")
+
+        # 在线更新：确认 updater / update_dialog 都进了包
+        try:
+            import updater
+            import update_dialog
+            log(f"updater   = repo {st.get('update.repo', '')} "
+                f"/ auto {st.get('update.auto', True)}")
+        except Exception as e:
+            log(f"updater FAIL = {type(e).__name__}: {e}")
+            rc = 2
+
         log("RESULT    = OK")
     except Exception as e:
         import traceback
@@ -2234,6 +2344,69 @@ def edgecheck() -> int:
     return rc
 
 
+def updatecheck() -> int:
+    """打包后验证更新链路：能连上 GitHub API 并解析出 latest Release。"""
+    import tempfile
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    lines: list[str] = []
+    rc = 0
+
+    def log(msg: str):
+        lines.append(str(msg))
+
+    try:
+        import updater
+        st = store.Store()
+        repo = str(st.get("update.repo", "") or "")
+        hit: dict = {}
+        u = updater.Updater()
+
+        def on_checked(ok, info, err):
+            hit.update(ok=ok, info=info, err=err)
+            app.quit()
+
+        u.checked.connect(on_checked)
+        log(f"repo      = {repo}")
+        u.check(repo)
+        QTimer.singleShot(20000, app.quit)
+        app.exec()
+        if not hit:
+            log("RESULT    = FAIL timeout")
+            rc = 2
+        elif not hit.get("ok"):
+            err = str(hit.get("err") or "")
+            if "限流" in err or "403" in err or "429" in err:
+                # 403 说明 HTTPS 和 API 都通了，只是额度用光——
+                # 对「打包是否完整」这个自检目的来说算通过
+                log(f"note      = {err}（网络链路正常）")
+                log("RESULT    = OK (rate limited)")
+            else:
+                log(f"error     = {err}")
+                log("RESULT    = FAIL")
+                rc = 2
+        else:
+            info = hit.get("info") or {}
+            log(f"latest    = {info.get('tag')} "
+                f"(version {info.get('version')})")
+            log(f"asset     = {info.get('asset')}")
+            log(f"size      = {info.get('size') or '（下载时取 Content-Length）'}")
+            log(f"body      = {len(info.get('body') or '')} chars")
+            log("RESULT    = OK")
+    except Exception:
+        import traceback
+        log("RESULT    = FAIL")
+        log(traceback.format_exc())
+        rc = 1
+
+    out = Path(tempfile.gettempdir()) / "interline_updatecheck.txt"
+    try:
+        out.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+    return rc
+
+
 def pdfcheck(path: str) -> int:
     """打包后验证 PDF 解析：cmap 数据表如果没被收进 exe，中文会解析失败。
 
@@ -2274,6 +2447,8 @@ def main():
         return selftest()
     if "--edgecheck" in sys.argv:
         return edgecheck()
+    if "--updatecheck" in sys.argv:
+        return updatecheck()
     if "--pdfcheck" in sys.argv:
         i = sys.argv.index("--pdfcheck")
         target = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
@@ -2331,6 +2506,10 @@ def main():
     # 没指定文件就接着上次读。用 singleShot(0) 让窗口先画出来，
     # EPUB/PDF 解析要几百毫秒，直接调会让启动看着卡一下
     QTimer.singleShot(0, win._restore_last_book)
+
+    # 更新检查晚 3 秒：别跟「恢复上次那本书」抢启动那一秒
+    QTimer.singleShot(3000, win.check_updates)
+    win._update_timer.start()
 
     return app.exec()
 

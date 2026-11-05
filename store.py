@@ -66,7 +66,8 @@ DEFAULT_CONFIG = {
     # 空 = 系统默认语音（离线）。voice 是老版本的纯系统语音名，保留兼容。
     "tts": {"engine": "winrt", "voice": "", "voice_id": "",
             "rate": 0.0, "volume": 1.0, "output_device": ""},
-    "update": {"base_url": "", "check_minutes": 10, "auto": True},
+    # 更新检查比对 GitHub Release；repo 换成自己的就自动适配
+    "update": {"repo": "chenbtt/interline", "check_minutes": 60, "auto": True},
     "keys": DEFAULT_KEYS,
 }
 
