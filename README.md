@@ -55,6 +55,8 @@
 
 气泡宽度、奶蛙大小、音量都在设置里调。退出奶读模式会回到原来的窗口尺寸和位置，不会留下一个 350 像素的窗口。
 
+素材本身是低帧率的：每个动作只有 4–8 张关键帧，原速播放时单帧要停 70–125 ms，看着一顿一顿。`make_pet_sheet.py` 的处理分两种——`idle` 这个常驻状态做了帧间插值（6 → 12 帧、16 fps，循环总时长不变），跑动、跳、摇头这类动作则只提高播放帧率来缩短单帧停留。后者不插帧是因为它们的整体位移很小、肢体却在大幅摆动，任何 2D 混合都会把两条腿糊在一起；`idle` 的相邻帧位移不到 1 像素，插出来是干净的。
+
 <p align="center">
   <img src="screenshots/pet-mode.png" width="420" alt="奶读模式">
   <img src="screenshots/settings-pet.png" width="420" alt="奶蛙设置">
@@ -157,7 +159,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `edge_speech.py` | 在线音色：MP3 合成缓存、并发预取、播放与词边界 |
 | `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
-| `make_pet_sheet.py` | 下载奶蛙素材、切行校对、生成 `sheet.png` 与 `manifest.json` |
+| `make_pet_sheet.py` | 下载奶蛙素材、切行校对、帧间插值，生成 `sheet.png` 与 `manifest.json` |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑

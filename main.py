@@ -385,9 +385,11 @@ class Reader(QWidget):
         self._pet_last_ms = 0.0
         self._pet_idle_ms = 0.0
         self._pet_ducked = False
-        # 30ms 轮询，真正的帧率由 PetState 按 manifest 里的 fps 决定
+        # 16ms 轮询（约 60Hz），真正的帧率由 PetState 按 manifest 里的 fps 决定。
+        # 原来 30ms 对 8-14fps 够用，但 idle 插帧后到 16fps、跑动到 16fps，
+        # 30ms 的量化误差会让个别帧多停一拍，反而看出抖
         self._pet_timer = QTimer(self)
-        self._pet_timer.setInterval(30)
+        self._pet_timer.setInterval(16)
         self._pet_timer.timeout.connect(self._pet_tick)
         # 笑声盖住朗读时把朗读压低，播完恢复；退出模式时也必须恢复
         self._pet_duck_timer = QTimer(self)
@@ -2803,17 +2805,25 @@ def selftest() -> int:
             import json as _json
             sheet = assets.naiwa("sheet.png")
             img = QImage(str(sheet))
-            ok_img = (not img.isNull()) and (img.width(), img.height()) == (1536, 2288)
+            meta = _json.loads(assets.naiwa("manifest.json").read_text(encoding="utf-8"))
+            # 尺寸从清单推，别硬编码：改了列数（插帧）就得同步改断言
+            cols = int(meta.get("cols") or 0)
+            rows = max((a.get("row", 0) for a in (meta.get("anims") or {}).values()),
+                       default=0) + 1
+            want = (cols * int(meta.get("frame_w", 0)), rows * int(meta.get("frame_h", 0)))
+            ok_img = (not img.isNull()) and (img.width(), img.height()) == want
             log(f"pet sheet = {sheet.name} {img.width()}x{img.height()} "
-                f"{'OK' if ok_img else 'FAIL'}")
+                f"（清单要 {want[0]}x{want[1]}）{'OK' if ok_img else 'FAIL'}")
             if not ok_img:
                 rc = 2
 
-            meta = _json.loads(assets.naiwa("manifest.json").read_text(encoding="utf-8"))
-            log(f"pet anims = {len(meta.get('anims') or {})} 种动画 "
+            anims = meta.get("anims") or {}
+            interped = sum(1 for a in anims.values()
+                           if a.get("frames") != a.get("src_frames"))
+            log(f"pet anims = {len(anims)} 种动画 "
                 f"/ 帧 {meta.get('frame_w')}x{meta.get('frame_h')} "
-                f"/ {meta.get('cols')} 列")
-            if not (meta.get("anims") and meta.get("frame_w")):
+                f"/ {cols} 列 / {interped} 个动作插过帧")
+            if not (anims and meta.get("frame_w")):
                 rc = 2
 
             sfx = [assets.naiwa(f"sfx/{n}") for n in
