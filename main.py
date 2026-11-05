@@ -37,7 +37,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 43
+BUILD_VERSION = 44
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -1223,7 +1223,8 @@ class Reader(QWidget):
         self._font_cache = (req, real)
         return real
 
-    def _block_formats(self, size: int, line_h: float, fm: QFontMetrics):
+    def _block_formats(self, size: int, line_h: float, fm: QFontMetrics,
+                       body_font: QFont | None = None):
         """构造一套块/字符格式。
 
         全量重排和「只改排版」的快路径共用这里，否则两套参数迟早漂移
@@ -1262,6 +1263,11 @@ class Reader(QWidget):
 
         char_body = QTextCharFormat()
         char_body.setForeground(QColor(fg_color))
+        # 正文字号显式写进字符格式。以前只靠 document 默认字体，
+        # 一旦字符格式被别的路径污染（一行模式把唯一那块当标题格式化过），
+        # 字号滑杆只 merge 块格式，就再也改不回来。
+        if body_font is not None:
+            char_body.setFont(body_font)
 
         return fmt_body, fmt_head, char_head, char_body
 
@@ -1299,12 +1305,16 @@ class Reader(QWidget):
         font = self._make_font(size, weight)
         doc = self.view.document()
         doc.setDefaultFont(font)
+        # 一行模式会把当前字符格式换成单句用的字体。不清掉的话，
+        # 下面 setPlainText 会拿它插入整章，正文全部跟着变大。
+        self.view.setFont(font)
+        self.view.setCurrentCharFormat(QTextCharFormat())
 
         title, body = self._chapter_parts(ch)
         self.view.setPlainText(title + "\n" + body)
 
         fmt_body, fmt_head, char_head, char_body = self._block_formats(
-            size, line_h, QFontMetrics(font))
+            size, line_h, QFontMetrics(font), font)
 
         block = doc.begin()
         first = True
@@ -1506,6 +1516,7 @@ class Reader(QWidget):
         拖滑杆时文本内容没变，没必要 setPlainText 再遍历上千个 block，
         一次 mergeBlockFormat 就够，否则每帧 150ms 以上根本没法实时预览。
         """
+        size_arg = size
         if size is not None:
             self.st.set("font.size", int(size))
         if line_h is not None:
@@ -1524,14 +1535,27 @@ class Reader(QWidget):
         font = self._make_font(size, weight)
         doc = self.view.document()
         doc.setDefaultFont(font)
+        self.view.setFont(font)
 
-        fmt_body, fmt_head, char_head, _cbody = self._block_formats(
-            size, line_h, QFontMetrics(font))
+        fmt_body, fmt_head, char_head, char_body = self._block_formats(
+            size, line_h, QFontMetrics(font), font)
+
+        # 一行模式下文档里只有当前这一句，不存在「首块是章节标题」。
+        # 走下面那个标题分支会把这一句放大加粗，还把当前字符格式带脏，
+        # 退出后整章都继承成大字、且字号滑杆再也改不动。
+        if self._one_line:
+            self._paint_one_line()
+            if persist:
+                self.st.save_config()
+            return
 
         # 一次合并所有块的块级格式（不碰字符格式，正文颜色保留）
         cur = QTextCursor(doc)
         cur.select(QTextCursor.SelectionType.Document)
         cur.mergeBlockFormat(fmt_body)
+        # 字号真的变了才刷新字符格式：行距调整不需要，也能少一次全文遍历
+        if size_arg is not None:
+            cur.mergeCharFormat(char_body)
 
         # 首块是章节标题：整体覆盖回标题格式，并把绝对字号补回去
         first = QTextCursor(doc.firstBlock())
@@ -1951,9 +1975,11 @@ class Reader(QWidget):
         width = max(lo, min(need, hi, screen))
         self.setFixedWidth(int(width))
 
-        self.view.setPlainText(text)
+        # 先定字体再换文本，确保这一句没有被上一次的字符格式带脏
         self.view.document().setDefaultFont(font)
         self.view.setFont(font)
+        self.view.setCurrentCharFormat(QTextCharFormat())
+        self.view.setPlainText(text)
         self.view.setExtraSelections([])
         self._tts_base = 0
         self._hl_tts = None
