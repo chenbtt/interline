@@ -1,15 +1,15 @@
 """奶蛙吸附边缘素材：构建期工具（只产美术，不含吸附逻辑）。
 
     python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图（图生图用）
-    python make_pet_edges.py --build    # 抠图 + 摆放 + 八向四相位裁切
+    python make_pet_edges.py --build    # 抠图 + 对齐 + 八向三相位裁切
     python make_pet_edges.py --sheet    # 八向 base 帧 3x3 拼图
     python make_pet_edges.py --context  # 模拟桌面贴边的场景图
     python make_pet_edges.py --anim     # 胶片条 + GIF，验证动画
 
-产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}-{base,in,out,blink}.png
-      32 张 256x256 RGBA
+产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}-{base,blink,hi}.png
+      24 张 256x256 RGBA
 
-素材来源是两个目录，文件名带相位后缀（@in / @out / @blink）：
+素材来源是两个目录，文件名带相位后缀（@blink / @hi）：
     assets/naiwa/edges/src/side/   斜姿态，出七向（四边里的三条 + 四角）
     assets/naiwa/edges/src/peek/   探身下望，只出 n；缺省则退回对半切
 
@@ -58,8 +58,9 @@ BREATH = False
 
 DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 
-# 相位：base 是常态，blink 是眨眼。缺哪个就退回 base，不会空窗。
-PHASES = ("base", "in", "out", "blink") if BREATH else ("base", "blink")
+# 相位：base 常态、blink 眨眼、hi 抬手（鼠标指上来时用）。
+# 缺哪个就退回 base，不会空窗。
+PHASES = (("base", "in", "out", "blink") if BREATH else ("base", "blink")) + ("hi",)
 
 
 # ---------------------------------------------------------------- 切参考帧
@@ -190,67 +191,120 @@ def _paste(canvas: Image.Image, part: Image.Image, x: int, y: int) -> None:
     canvas.alpha_composite(part.crop((sx0, sy0, sx0 + w, sy0 + h)), (dx0, dy0))
 
 
-def place(frog: Image.Image, cut: str, ratio: float, valign: str | None) -> Image.Image:
-    """把蛙摆到画布上，让被切的部分露在画布外。
+def _anchor_x(im: Image.Image) -> float:
+    """取底部 1/4 可见像素的水平重心，当作「身体」的锚点。
 
-    被切的那一侧直接摆到负坐标，超出画布的部分自然消失——切面因此
-    正好压在画布边缘上，这就是接入时对齐的那条线。
+    只对**基准帧**算一次，所有相位共用。每帧各算各的话，抬手帧少了一只手
+    撑着、重心就偏，身体在 hover 时会横跳（实测顶边偏 18px）。
+
+    取底部这一段是因为它最不动：侧姿态是脚，顶边那张头朝下，那就是头。
+    """
+    a = np.asarray(im)[:, :, 3] > 8
+    h = a.shape[0]
+    band = a[int(h * 0.75):]
+    ys, xs = np.where(band)
+    return float(xs.mean()) if len(xs) else a.shape[1] / 2
+
+
+def _best_shift(ref: np.ndarray, ph: np.ndarray, rng: int = 96) -> tuple[int, int]:
+    """相位帧要挪多少才能跟基准帧的身体重合：返回 (dy, dx)。
+
+    判据是「剪影重叠面积最大」。抬手帧多出来的那只手伸在空白处，重叠面积
+    为 0，挪到哪儿都不加分，所以最优解只由身体决定——换成包围盒居中或者
+    重心对齐都会被那只手带偏（实测侧姿态 34px、顶边 18px）。
+
+    用 FFT 做互相关再取峰，比按偏移量暴力搜索快两个数量级。
+    """
+    h = ref.shape[0] + ph.shape[0] + 2 * rng
+    w = ref.shape[1] + ph.shape[1] + 2 * rng
+    fa = np.fft.rfft2((ref > 8).astype(np.float32), (h, w))
+    fb = np.fft.rfft2((ph > 8).astype(np.float32), (h, w))
+    cc = np.fft.fftshift(np.fft.irfft2(fa * np.conj(fb), (h, w)))
+    cy, cx = h // 2, w // 2
+    win = cc[cy - rng:cy + rng + 1, cx - rng:cx + rng + 1]
+    ky, kx = np.unravel_index(int(np.argmax(win)), win.shape)
+    return int(ky - rng), int(kx - rng)
+
+
+def _align(base: Image.Image,
+           frames: dict[str, Image.Image]) -> dict[str, tuple[Image.Image, int, int]]:
+    """把相位帧挪进基准帧的坐标系：返回 (图, dx, dy)。
+
+    抬手帧是重新生成的，模型把整个蛙在画布里画偏了。各帧按自己的包围盒
+    摆位的话，hover 时身体会平移，顶边那张举起来的手还会顶出画布被切掉。
+
+    只算偏移、不动画布尺寸——偏移可以是负数（手伸到基准帧左边界之外），
+    贴图时溢出画布的部分自然消失。
+    """
+    ref = np.asarray(base)[:, :, 3]
+    out: dict[str, tuple[Image.Image, int, int]] = {"base": (base, 0, 0)}
+    for phase, im in frames.items():
+        if phase == "base":
+            continue
+        dy, dx = _best_shift(ref, np.asarray(im)[:, :, 3])
+        out[phase] = (im, dx, dy)
+    return out
+
+
+def _geom(base: Image.Image, cut: str, amount: int, valign: str | None,
+          anchor: float | None) -> tuple[int, int]:
+    """算**基准帧**该摆在画布上的哪个位置；所有相位共用这一组坐标。
+
+    amount 是像素、按基准帧算：切的是屏幕边缘，它不会因为蛙抬手而移动。
+    左右贴边时横向位置由切口决定；上下两条边横向自由，靠 anchor（身体
+    锚点该落在的 x）定；顶边那张的 anchor 就是头。
+
+    anchor 为 None 且不是上下切口时按包围盒居中。
     """
     c = CANVAS
-    w, h = frog.size
+    w, h = base.size
 
     if cut == "left":
-        x = -int(ratio * w)
+        x = -amount
     elif cut == "right":
-        x = c - w + int(ratio * w)
+        x = c - w + amount
+    elif anchor is not None:
+        x = round(anchor - _anchor_x(base))
     else:
         x = (c - w) // 2
 
     # 先裁掉水平溢出，再拿**剩下的可见像素**算垂直贴角。
     # 蛙头顶是不对称的（斜姿态 + 举手），镜像之后最高点可能整个落在
     # 被切掉的那一侧；用整张图的包围盒贴角会贴出一条十几像素的缝。
-    dx = max(0, x)
-    vis = frog.crop((max(0, -x), 0, min(w, c - dx), h))
+    vis = base.crop((max(0, -x), 0, min(w, c - max(0, x)), h))
     _, vy0, _, vy1 = _alpha_box(vis)
 
     if cut == "top":
-        y = -int(ratio * h)
+        y = -amount
     elif cut == "bottom":
-        y = c - h + int(ratio * h)
+        y = c - h + amount
     elif valign == "top":
         y = -vy0                    # 贴角：可见像素顶到画布边
     elif valign == "bottom":
         y = c - vy1
     else:
         y = (c - h) // 2
+    return x, y
 
-    canvas = Image.new("RGBA", (c, c), (0, 0, 0, 0))
-    _paste(canvas, vis, dx, y)
+
+def place(frog: Image.Image, x: int, y: int) -> Image.Image:
+    """把一张相位帧贴到画布 (x, y)。负坐标表示溢出画布，溢出部分丢掉。
+
+    被切的那一侧因此正好压在画布边缘上，这就是接入时对齐的那条线。
+    """
+    canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
+    _paste(canvas, frog, x, y)
     return canvas
 
 
-def _trim_top(im: Image.Image, target_h: int) -> Image.Image:
-    """从顶部裁掉多余的背，让可见高度正好等于 target_h。
+def _trim_top(im: Image.Image, rows: int) -> Image.Image:
+    """从顶部裁掉 rows 行。
 
-    裁掉的那段是「要被屏幕边缘挡住的背」，所以裁多裁少都不影响切口——
-    切口永远在画布上边。逐帧裁剪量不同，才造得出上下浮动。
+    裁掉的那段是「要被屏幕边缘挡住的背」，裁多裁少都不影响切口位置——
+    切口永远在画布上边。但**每帧必须裁一样多**（按基准帧算），否则相位
+    之间会上下错位。想造上下浮动就逐帧改这个量。
     """
-    trim = im.height - target_h
-    if trim <= 0:
-        return im
-    return im.crop((0, trim, im.width, im.height))
-
-
-def place_peek(frog: Image.Image) -> Image.Image:
-    """顶边专用：蛙趴在边缘上往下探，身子在屏幕外。
-
-    这张图本身画的就是「头在下、身体被画面上边切平」的构图，所以不套
-    上面那套裁切比例——可见像素顶到画布上边，切口自然就落在那里。
-    """
-    c = CANVAS
-    canvas = Image.new("RGBA", (c, c), (0, 0, 0, 0))
-    _paste(canvas, frog, (c - frog.width) // 2, 0)
-    return canvas
+    return im.crop((0, rows, im.width, im.height)) if rows > 0 else im
 
 
 def _frames(dir_path: Path) -> dict[str, Path]:
@@ -266,16 +320,19 @@ def _frames(dir_path: Path) -> dict[str, Path]:
     return out
 
 
-def _scale(frames: dict[str, Path], *, h: int = 0, w: int = 0) -> dict[str, Image.Image]:
-    """把同一姿态的相位帧缩放到**同一个系数**。
+def _scale(frames: dict[str, Path], *,
+           h: int = 0, w: int = 0) -> dict[str, tuple[Image.Image, int, int]]:
+    """缩放到**同一个系数**并挪进基准帧的坐标系。
 
-    这一步不能偷懒写成「每帧各自缩到固定高度」：吸气帧本来就比基准帧
-    高 2%，再被拉回同一高度，呼吸就被吃干净了，播起来一动不动。
-    所以先用基准帧定系数，全体乘同一个 k。
+    缩放不能偷懒写成「每帧各自缩到固定高度」：吸气帧本来就比基准帧高 2%，
+    再被拉回同一高度，呼吸就被吃干净了，播起来一动不动。所以先用基准帧
+    定系数 k，全体乘同一个 k。
+
+    返回的 (图, dx, dy) 里 dx/dy 是相对基准帧左上角的偏移，见 _align。
     """
     base = cutout(frames["base"])
     k = (h / base.height) if h else (w / base.width)
-    out: dict[str, Image.Image] = {}
+    scaled: dict[str, Image.Image] = {}
     for phase, path in frames.items():
         im = base if phase == "base" else cutout(path)
         # 相位帧必须是同一构图下的重画。尺寸差太多只有两种可能：
@@ -284,9 +341,29 @@ def _scale(frames: dict[str, Path], *, h: int = 0, w: int = 0) -> dict[str, Imag
         r = im.height / base.height
         if phase != "base" and not 0.85 < r < 1.15:
             print(f"  ！{phase} 帧高度是基准的 {r:.0%}，八成源分辨率不一致或换了姿势")
-        out[phase] = im.resize((max(1, round(im.width * k)),
-                                max(1, round(im.height * k))), Image.LANCZOS)
-    return out
+        scaled[phase] = im.resize((max(1, round(im.width * k)),
+                                   max(1, round(im.height * k))), Image.LANCZOS)
+    return _align(scaled["base"], scaled)
+
+
+def _offs(frames: dict[str, tuple[Image.Image, int, int]]) -> str:
+    """把各相位的对齐偏移打成一行，方便肉眼核对。"""
+    return " ".join(f"{p}=({dx:+d},{dy:+d})" for p, (_, dx, dy) in sorted(frames.items()))
+
+
+def oriented(frames: dict[str, tuple[Image.Image, int, int]],
+             flip: bool) -> dict[str, tuple[Image.Image, int, int]]:
+    """把一组相位帧整体镜像（西侧三个方向用），偏移跟着换算。
+
+    偏移的定义是「自己的左上角落在基准帧坐标系的哪儿」。镜像轴是**基准帧
+    自己的中轴**，不是 0——原图跨 [ox, ox+w]，翻过来跨 [W-ox-w, W-ox]，
+    所以新偏移是 W - ox - w（基准帧自己的 ox=0 时结果仍是 0，不会整体跑掉）。
+    """
+    if not flip:
+        return frames
+    mid = frames["base"][0].width
+    return {p: (im.transpose(Image.FLIP_LEFT_RIGHT), mid - ox - im.width, oy)
+            for p, (im, ox, oy) in frames.items()}
 
 
 def build() -> None:
@@ -298,55 +375,84 @@ def build() -> None:
 
     side = _scale(side_src, h=FROG_H)
     side = {p: v for p, v in side.items() if p in PHASES}
-    b = side["base"]
+    b = side["base"][0]
+    # 上下两条边不约束横向位置，得给个身体锚点
+    anchor_side = (CANVAS - b.width) // 2 + _anchor_x(b)
     print(f"侧姿态 = {b.width}x{b.height}  相位 {'/'.join(sorted(side))}")
+    print(f"  对齐 {_offs(side)}")
 
     # 顶边单独一张姿态（探身下望）。没有就用对半切的老办法兜底，
     # 那种切法只剩腹部和脚，能用但看不出是蛙
-    peek: dict[str, Image.Image] = {}
+    peek: dict[str, tuple[Image.Image, int, int]] = {}
     peek_src = _frames(SRC_PEEK) if SRC_PEEK.is_dir() else {}
     if "base" in peek_src:
         peek = _scale(peek_src, w=PEEK_W)
-        # 背画得太长，从顶上裁掉：那段在屏幕外，裁了没人看得见。
-        # 每帧裁一样多，头到切口的距离就恒定——顶边不做浮动
-        peek = {p: _trim_top(im, PEEK_MAX_H) for p, im in peek.items()}
         peek = {p: v for p, v in peek.items() if p in PHASES}
-        pb = peek["base"]
+        # 背画得太长，从顶上裁掉：那段在屏幕外，裁了没人看得见。
+        # 按基准帧定行数、所有相位裁一样多，偏移量因此不受影响
+        rows = max(0, peek["base"][0].height - PEEK_MAX_H)
+        peek = {p: (_trim_top(im, rows), ox, oy) for p, (im, ox, oy) in peek.items()}
+        pb = peek["base"][0]
+        anchor_peek = (CANVAS - pb.width) // 2 + _anchor_x(pb)
         print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}")
+        print(f"  对齐 {_offs(peek)}")
     else:
         print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
 
     for d in DIRS:
         cfg = SPEC[d]
-        for phase in PHASES:
-            if d == "n":
-                if phase in peek:
-                    img = place_peek(peek[phase])
-                elif "base" in peek:
-                    img = place_peek(peek["base"])
-                else:
-                    img = place(side["base"], cfg["cut"], cfg["ratio"], cfg["valign"])
-            else:
-                frog = side.get(phase) or side["base"]
-                if cfg["flip"]:
-                    frog = frog.transpose(Image.FLIP_LEFT_RIGHT)
-                img = place(frog, cfg["cut"], cfg["ratio"], cfg["valign"])
-            img.save(OUT / f"edge-{d}-{phase}.png", "PNG")
+        use_peek = d == "n" and bool(peek)
+        # 先翻到目标朝向再算几何：镜像会换掉「哪半边是被切掉的那侧」，
+        # 拿未翻转的基准帧去算 x，再贴翻转后的图，会整套推到画布外
+        pool = oriented(peek if use_peek else side, cfg["flip"])
+        ref = pool["base"][0]
+        if use_peek:
+            # 顶边那张的构图已经是「头朝下压在边缘上」，不套裁切比例：
+            # 可见像素顶到画布上边，切口自然就落在那里
+            gx = round(anchor_peek - _anchor_x(ref))
+            gy = 0
+        else:
+            # 裁切量按基准帧算一次，所有相位共用
+            cut_px = (round(cfg["ratio"] * ref.width) if cfg["cut"] in ("left", "right")
+                      else round(cfg["ratio"] * ref.height))
+            # 横向锚点只有上下两条边用得上；四个斜向都是左右切口，用不到
+            gx, gy = _geom(ref, cfg["cut"], cut_px, cfg["valign"], anchor_side)
 
-    # 校验：切面必须逐帧落在画布同一条边上，否则播起来切口会抖
+        for phase in PHASES:
+            im, ox, oy = pool.get(phase) or pool["base"]
+            place(im, gx + ox, gy + oy).save(OUT / f"edge-{d}-{phase}.png", "PNG")
+
+    # 校验：切面必须逐帧落在同一条画布边上，否则播起来切口会抖；
+    # 同时也不能有帧被画布的左右边界切到——那是屏幕中间，切了就是莫名其妙的直边
     print()
+    bad = 0
     for d in DIRS:
+        cfg = SPEC[d]
+        cut = "top" if (d == "n" and peek) else cfg["cut"]
         line = []
         for phase in PHASES:
             p = OUT / f"edge-{d}-{phase}.png"
             if not p.exists():
                 line.append(f"{phase}=缺")
+                bad += 1
                 continue
-            a = np.asarray(Image.open(p))[:, :, 3] > 8
-            ys, xs = np.where(a)
-            box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
-            line.append(f"{phase}={box}")
+            a = np.asarray(Image.open(p))[:, :, 3]
+            if a.max() <= 8:
+                line.append(f"{phase}=空")
+                bad += 1
+                continue
+            x0, y0, x1, y1 = _alpha_box(Image.open(p))
+            line.append(f"{phase}=({x0},{y0},{x1},{y1})")
+            hit = {"left": x0 == 0, "right": x1 == CANVAS,
+                   "top": y0 == 0, "bottom": y1 == CANVAS}[cut]
+            if not hit:
+                bad += 1
+                line.append(f"!{phase}切口没贴边")
+            if cut in ("top", "bottom") and (x0 <= 0 or x1 >= CANVAS):
+                bad += 1
+                line.append(f"!{phase}被画布侧边切了")
         print(f"  edge-{d}: " + "  ".join(line))
+    print(f"\n  切口/侧边不合格 {bad} 处")
 
 
 def sheet() -> None:
@@ -472,8 +578,10 @@ def anim() -> None:
         fd.text((12, CANVAS - 22), phase, fill=(130, 140, 155))
         frames.append(fr.convert("RGB"))
     gif = HERE / "screenshots" / "pet-edges-anim.gif"
-    # 不做呼吸时 base 停久一点，看着就是「静止的蛙偶尔眨一下眼」
-    dwell = {"base": 420 if BREATH else 1800, "in": 420, "out": 420, "blink": 160}
+    # 不做呼吸时 base 停久一点，看着就是「静止的蛙偶尔眨一下眼」；
+    # hi 停久一点，是「鼠标压在上面时才抬手」
+    dwell = {"base": 420 if BREATH else 1800, "in": 420, "out": 420,
+             "blink": 160, "hi": 900}
     frames[0].save(gif, save_all=True, append_images=frames[1:],
                    duration=[dwell.get(p, 300) for p in PHASES],
                    loop=0, optimize=False)

@@ -76,11 +76,13 @@
 
 **贴边形态**
 
-拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态，**身体不动，只眨眼**：八向 × 二相位（`base` / `blink`）共 16 张 256×256 透明 PNG（`assets/naiwa/edges/`），**吸附逻辑还没接**。
+拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态，**身体不动，只眨眼和抬爪**：八向 × 三相位（`base` / `blink` / `hi`）共 24 张 256×256 透明 PNG（`assets/naiwa/edges/`），**吸附逻辑还没接**。
 
-眨眼不进任何循环：停 2–4 秒随机，闪一帧 160 ms 就回来。不做呼吸是刻意的——顶边那张的呼吸动的是头，稍微给多一点就像在引体向上；侧姿态那 8px 躯干胀缩在 256px 上基本看不出来。想恢复把 `make_pet_edges.py` 里的 `BREATH` 打开，源图还在。
+眨眼不进任何循环：停 2–4 秒随机，闪一帧 160 ms 就回来。抬爪是交互不是循环——鼠标指针压在蛙身上才 `hi`，移开立刻回 `base`；不自己播完就放下来。判定 hover 得按 alpha 采点，窗口是 256×256，可见像素只占 14–34%，按矩形判会「隔空招手」。
 
-规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移，换帧也别动窗口位置。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×2 胶片条）、`pet-edges-anim.gif`（三个方向的眨眼）。
+不做呼吸是刻意的——顶边那张的呼吸动的是头，稍微给多一点就像在引体向上；侧姿态那 8px 躯干胀缩在 256px 上基本看不出来。想恢复把 `make_pet_edges.py` 里的 `BREATH` 打开，源图还在。
+
+规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移，换帧也别动窗口位置。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（三个方向的眨眼与抬爪）。
 
 <p align="center">
   <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
@@ -189,7 +191,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
 | `make_pet_sheet.py` | 下载奶蛙素材、切行校对、帧间插值，生成 `sheet.png` 与 `manifest.json` |
 | `make_pet_ai.py` | 构建期工具：图生图补中间帧（准备输入 / 扣底对齐 / 宽度归一化 / 镜像派生） |
-| `make_pet_edges.py` | 构建期工具：贴边素材抠图、八向摆位裁切、拼图与场景预览 |
+| `make_pet_edges.py` | 构建期工具：贴边素材抠图、相位剪影对齐、八向摆位裁切、拼图与场景预览 |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑

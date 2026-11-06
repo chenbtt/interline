@@ -16,6 +16,9 @@ InterlineData/
 # 开发期截图草稿（screenshots/ 里的正式图要保留）
 preview_*.png
 
+# 调试探针图（对齐 / 幅度 / 逐帧对照），只在本机看，不进库
+tts-samples/
+
 # 编辑器
 .vscode/
 .idea/
