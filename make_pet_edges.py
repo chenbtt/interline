@@ -49,16 +49,17 @@ FROG_H = 224          # 摆位后蛙的高度：与站立帧 208 接近，吸附
 PEEK_W = 187
 PEEK_MAX_H = 150
 
-# 顶边上下浮动的幅度（像素，加在可见高度上）。模型自己画的幅度是往上
-# 29px、往下 4px，挂在屏幕边上像在做引体向上。这里不靠重画，靠逐帧不同
-# 的裁剪量压到 ±6：蛙缩上去时被屏幕挡住的背本来就更多。
-PEEK_BOB = {"base": 0, "in": -6, "out": 6, "blink": 0}
+# 呼吸相位。关着：吸附态只眨眼，身体一动不动（用户定的）。
+# 打开就多出 in / out 两帧——源图还在 src/*/@in.png、@out.png，
+# 改这一行重跑 --build 即可，不必重新生成。
+# 关掉的理由：顶边挂着时动的是头，幅度一大就抢眼；侧姿态那点躯干胀缩
+# 在 256px 上几乎看不出来，收益不值这套复杂度。
+BREATH = False
 
 DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 
-# 吸附态的呼吸循环。播放顺序 base → in → base → out，眨眼帧 base→blink→base
-# 另外插进去。四个相位都要，缺哪个就退回 base，不会空窗。
-PHASES = ("base", "in", "out", "blink")
+# 相位：base 是常态，blink 是眨眼。缺哪个就退回 base，不会空窗。
+PHASES = ("base", "in", "out", "blink") if BREATH else ("base", "blink")
 
 
 # ---------------------------------------------------------------- 切参考帧
@@ -296,6 +297,7 @@ def build() -> None:
         return
 
     side = _scale(side_src, h=FROG_H)
+    side = {p: v for p, v in side.items() if p in PHASES}
     b = side["base"]
     print(f"侧姿态 = {b.width}x{b.height}  相位 {'/'.join(sorted(side))}")
 
@@ -305,15 +307,12 @@ def build() -> None:
     peek_src = _frames(SRC_PEEK) if SRC_PEEK.is_dir() else {}
     if "base" in peek_src:
         peek = _scale(peek_src, w=PEEK_W)
-        # 背画得太长，从顶上裁一段。裁多少就是「屏幕边缘挡住了多少背」——
-        # 蛙往上缩的时候被挡住的本来就更多，所以逐帧的裁剪量不同是物理
-        # 正确的，不是后期拉扯。生成时模型给的浮动量没法精确控制（要 4%
-        # 它给 20%），这里把它压到 PEEK_BOB 像素。
-        peek = {p: _trim_top(im, PEEK_MAX_H + PEEK_BOB.get(p, 0))
-                for p, im in peek.items()}
+        # 背画得太长，从顶上裁掉：那段在屏幕外，裁了没人看得见。
+        # 每帧裁一样多，头到切口的距离就恒定——顶边不做浮动
+        peek = {p: _trim_top(im, PEEK_MAX_H) for p, im in peek.items()}
+        peek = {p: v for p, v in peek.items() if p in PHASES}
         pb = peek["base"]
-        print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}"
-              f"  浮动 {PEEK_BOB['in']}~{PEEK_BOB['out']}px")
+        print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}")
     else:
         print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
 
@@ -473,9 +472,11 @@ def anim() -> None:
         fd.text((12, CANVAS - 22), phase, fill=(130, 140, 155))
         frames.append(fr.convert("RGB"))
     gif = HERE / "screenshots" / "pet-edges-anim.gif"
-    # 呼吸两个相位慢一点，眨眼一帧带过，凑成一个能看出节奏的循环
+    # 不做呼吸时 base 停久一点，看着就是「静止的蛙偶尔眨一下眼」
+    dwell = {"base": 420 if BREATH else 1800, "in": 420, "out": 420, "blink": 160}
     frames[0].save(gif, save_all=True, append_images=frames[1:],
-                   duration=[420, 420, 420, 160], loop=0, optimize=False)
+                   duration=[dwell.get(p, 300) for p in PHASES],
+                   loop=0, optimize=False)
     print(f"GIF = {gif}  ({gif.stat().st_size // 1024} KB，{len(frames)} 帧)")
 
 
