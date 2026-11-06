@@ -74,6 +74,12 @@
 
 图生图不是求中间值而是重画一帧，所以会顺带把不动的地方也重画（头部整段宽 5%、躯干 12%）。`make_pet_ai.py` 用逐行宽度归一化把轮廓压回两帧均值，头部误差从 4.5 px 降到 0.9 px；腿部区域不做这个校正，因为「两脚分开」和「两脚并拢」的跨度均值没有物理意义。中间帧的位置也不是完美的 50/50，实测落在 67% 附近，所以步长是「一大一小」交替，不是均匀减半。
 
+**贴边形态**
+
+拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态。八张静态图（`assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}.png`，256×256 透明 PNG）已经出好，**吸附逻辑还没接**。
+
+规格、命名、方向映射都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移。两张预览在 `screenshots/pet-edges.png`（八向拼图）和 `screenshots/pet-edges-context.png`（模拟桌面贴边）。
+
 <p align="center">
   <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
   <img src="screenshots/settings-pet.png" width="420" alt="奶蛙设置">
@@ -181,6 +187,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
 | `make_pet_sheet.py` | 下载奶蛙素材、切行校对、帧间插值，生成 `sheet.png` 与 `manifest.json` |
 | `make_pet_ai.py` | 构建期工具：图生图补中间帧（准备输入 / 扣底对齐 / 宽度归一化 / 镜像派生） |
+| `make_pet_edges.py` | 构建期工具：贴边素材抠图、八向摆位裁切、拼图与场景预览 |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑
