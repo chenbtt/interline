@@ -43,6 +43,12 @@ TOOL_INSET = 4         # 距工具带左右边
 TOOL_Y_GAP = 2         # 距气泡边：贴着放，别留一段让指针掉出去的死区
 TOOL_PAD = 4           # 按钮下沿留白
 TOOL_BAND = TOOL_Y_GAP + TOOL_BTN + TOOL_PAD   # 工具带整体高度 28
+# 五颗按钮一字排开所需的最窄工具带：左三 78 + 右二 50 + 两端留白 8 + 组间距 6。
+# 蛙缩小到 0.6 时站立帧只有 115px 宽，不够宽就会让 next 和 hide 叠在一起：
+# 后画的 hide 盖住 next（看起来少一颗），命中却先撞上 next（点展开变下一句）。
+TOOL_MIN_W = (3 * (TOOL_BTN + TOOL_GAP) - TOOL_GAP
+              + 2 * (TOOL_BTN + TOOL_GAP) - TOOL_GAP
+              + 2 * TOOL_INSET + TOOL_GAP)     # 142
 TOOL_MARGIN = 6        # 悬停带四周外扩：指针压到按钮边缘也不熄灭
 TOOL_FADE_MS = 130     # 淡入淡出时长
 TOOL_LEAVE_MS = 180    # 脱离窗口的宽限：系统偶发一次 leave 不该让工具条消失
@@ -287,7 +293,7 @@ class PetWindow(QWidget):
         # 吸附态气泡宽高都固定：换句只换气泡里的字，窗口一寸都不动。
         # 宽度取设置里的上限（正文会自动在这条宽度里重排），高度取正文最多
         # 能占的行数——两者都跟当前这句无关，才谈得上「位置保持不动」。
-        bw = max(max_w, 5 * TOOL_BTN + 4 * TOOL_GAP + 2 * TOOL_INSET)
+        bw = max(max_w, TOOL_MIN_W)
         bh = (pet.BUBBLE_MAX_LINES * pet.line_height(font)
               + 2 * pet.BUBBLE_PAD_Y) if show else 0
         block = bh + TOOL_BAND
@@ -786,12 +792,16 @@ class PetWindow(QWidget):
             # 气泡收起时留出一条工具带：不然「收起气泡」那颗按钮自己也
             # 跟着消失，用户只能靠右键菜单把它找回来
             h = frog.height() + (TOOL_BAND if self._text else 0)
-            return (QSize(frog.width(), h), None,
-                    QRect(0, 0, frog.width(), frog.height()))
+            # 工具带必须够五颗按钮一字排开；不够就把窗口加宽、蛙居中。
+            # _place 以窗口中心为锚，加宽不会让蛙跳位置。
+            w = max(frog.width(), TOOL_MIN_W if self._text else 0)
+            return (QSize(w, h), None,
+                    QRect((w - frog.width()) // 2, 0,
+                          frog.width(), frog.height()))
 
         max_w = int(self.st.get("pet.bubble_w", 360))
         body = pet.measure_bubble(self._font_factory(), self._text, max_w)
-        w = max(frog.width(), body.width())
+        w = max(frog.width(), body.width(), TOOL_MIN_W)
         h = body.height() + pet.BUBBLE_TAIL + BUBBLE_PAD + frog.height()
         bubble = QRect((w - body.width()) // 2, 0, body.width(), body.height())
         frog_r = QRect((w - frog.width()) // 2, h - frog.height(),

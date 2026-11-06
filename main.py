@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 59
+BUILD_VERSION = 60
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2608,6 +2608,29 @@ class Reader(QWidget):
 
 # ------------------------------------------------------------------ 入口
 
+def _check_data_dir(tag: str) -> Path:
+    """给自检单独开一个「每次运行都清空」的数据目录，保证回归图可复现。
+
+    --toolcheck 会改 pet.scale / colors.fg / pet.show_bubble，
+    set_bubble_visible() 又把整份配置写回 config.json。几个自检共用一个
+    固定的 %TEMP%/interline_check 时，下一次 --edgecheck 读到的就是上一次
+    的残值：画布从 230px / scale 0.90 漂到 154px / scale 0.60，连工具条
+    前景色都变了。回归图 md5 每次不同，就没法用它判断改动有没有伤到绘制。
+    目录按自检名分开、每次先清空，Store() 只会拿到 DEFAULT_CONFIG。
+    用赋值而不是 setdefault：自检绝不该写到用户真实配置里。
+    """
+    import shutil
+    import tempfile
+    d = Path(tempfile.gettempdir()) / f"interline_check_{tag}"
+    shutil.rmtree(d, ignore_errors=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    os.environ["INTERLINE_DATA_DIR"] = str(d)
+    return d
+
+
 def selftest() -> int:
     """打包后自检：确认关键依赖都被 PyInstaller 收进来了。
 
@@ -2953,6 +2976,7 @@ def petcheck() -> int:
         except Exception:
             pass
 
+    _check_data_dir("pet")
     rc = 0
     app = QApplication.instance() or QApplication(sys.argv[:1])
     try:
@@ -3057,8 +3081,7 @@ def toolcheck() -> int:
         except Exception:
             pass
 
-    os.environ.setdefault("INTERLINE_DATA_DIR",
-                          str(Path(tempfile.gettempdir()) / "interline_check"))
+    check_dir = _check_data_dir("tools")
     rc = 0
     app = QApplication.instance() or QApplication(sys.argv[:1])
     win = None
@@ -3077,6 +3100,7 @@ def toolcheck() -> int:
             return 2
         win.hide()                       # 只借它的绘制，不弹到桌面
         log(f"version = {BUILD_VERSION}")
+        log(f"data dir = {check_dir}（每次清空，不读用户配置）")
 
         size, bubble, frog = win._metrics()
         log(f"  窗口 {size.width()}x{size.height()} / 气泡 "
@@ -3376,6 +3400,7 @@ def toolcheck() -> int:
                     QImage.Format.Format_RGB32)
         ib.fill(QColor("#12161b"))
         ip = QPainter(ib)
+        orig_fg = st.get("colors.fg", "#c3cbd6")
         for i, (fg, bgc) in enumerate((("#c3cbd6", "#252a31"),
                                        ("#2b3038", "#e8e4da"))):
             st.set("colors.fg", fg)
@@ -3388,6 +3413,7 @@ def toolcheck() -> int:
                           b.grab().scaled(24 * 8, 20 * 8))
             b.deleteLater()
         ip.end()
+        st.set("colors.fg", orig_fg)     # 预览只是换色试画，别把残值留给后面的自检
         shot2 = here / "screenshots" / "pet-footbtn.png"
         shot2 = shot2 if shot2.parent.is_dir() else (
             Path(tempfile.gettempdir()) / "interline_footbtn.png")
@@ -3400,6 +3426,89 @@ def toolcheck() -> int:
         ok = win._hit(rects["play"].center()) != "tool:play"
         rc |= 0 if ok else 2
         log(f"  熄灭后不吃点击 {ok} {'ok' if ok else '??'}")
+
+        # ---- v60：小缩放 / 气泡收起时五颗按钮不重叠、点哪颗就是哪颗
+        # 真实翻车场景：pet.scale=0.6 时站立帧只有 115px 宽，左三的 next
+        # (60..81) 与右二的 hide (61..82) 叠在一起，后画的展开按钮盖住
+        # 「下一句」（看着少一颗），命中却先撞上 next（点展开变下一句）。
+        def check_toolbar(tag):
+            sz, _bub, _fr = win._metrics()
+            rs, _zn = win._toolbar()
+            ks = list(rs)
+            ov = [(a, b) for i, a in enumerate(ks) for b in ks[i + 1:]
+                  if rs[a].intersects(rs[b])]
+            inside = all(0 <= r.left() and r.right() < sz.width()
+                         and 0 <= r.top() and r.bottom() < sz.height()
+                         for r in rs.values())
+            hits = {k: win._hit(r.center()) == "tool:" + k
+                    for k, r in rs.items()}
+            good = (len(rs) == 5 and not ov and inside and all(hits.values()))
+            if not good:
+                log(f"    {tag} 窗口{sz.width()}x{sz.height()} 按钮{len(rs)} "
+                    f"重叠{ov} 窗内{inside} 命中{hits}")
+            return good
+
+        layout_ok = True
+        for sc, shown in ((0.5, False), (0.6, False), (0.6, True),
+                          (0.9, False), (0.9, True), (1.4, False),
+                          (2.0, True)):
+            win._edge_dir = ""
+            st.set("pet.scale", sc)
+            win.set_scale(sc)
+            win.set_bubble_visible(shown)
+            win._set_tools(True)
+            win._tools_alpha = 1.0
+            layout_ok &= check_toolbar(f"scale={sc} 气泡={shown}")
+        rc |= 0 if layout_ok else 2
+        log(f"  7 档缩放×气泡显隐 五颗不重叠且命中一致 {layout_ok} "
+            f"{'ok' if layout_ok else '??'}")
+
+        # 吸附态八向、小缩放、气泡显隐两态也要排得下五颗
+        st.set("pet.scale", 0.6)
+        win.set_scale(0.6)
+        snap_ok = True
+        for shown in (False, True):
+            win.set_bubble_visible(shown)
+            for d, a in anchors.items():
+                win._edge_dir = ""
+                win._snap_to(d, a, animate=False, screen=mock)
+                win._set_tools(True)
+                win._tools_alpha = 1.0
+                snap_ok &= check_toolbar(f"{d} 气泡={shown}")
+        rc |= 0 if snap_ok else 2
+        log(f"  八向×收起/展开 五颗不重叠且命中一致 {snap_ok} "
+            f"{'ok' if snap_ok else '??'}")
+
+        # 真鼠标点「展开」按钮：命中 hide、发出 collapse_bubble、气泡回来
+        win._edge_dir = ""
+        st.set("pet.scale", 0.6)
+        win.set_scale(0.6)
+        win.set_bubble_visible(False)
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        rs_c, _zn_c = win._toolbar()
+        center = rs_c["hide"].center()
+        send(QEvent.Type.MouseMove, center)
+        hover_ok = win._tool_hover == "hide"
+        got.clear()
+        send(QEvent.Type.MouseButtonPress, center,
+             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+        send(QEvent.Type.MouseButtonRelease, center,
+             Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+        fired = tuple(got) == (("hide",),)
+        fake = _FakeReader(st, win)
+        Reader._pet_collapse_bubble(fake)
+        expanded = bool(st.get("pet.show_bubble", True))
+        _sz2, bub2, _fr2 = win._metrics()
+        five = len(win._toolbar()[0]) == 5
+        ok = hover_ok and fired and expanded and bub2 is not None and five
+        rc |= 0 if ok else 2
+        log(f"  小缩放收起态点展开 悬停{hover_ok} / 发信号{fired} / "
+            f"气泡回来{expanded and bub2 is not None} / 五颗{five} "
+            f"{'ok' if ok else '??'}")
+        st.set("pet.scale", 0.9)
+        win.set_scale(0.9)
+        win.set_bubble_visible(True)
         log("RESULT = OK")
     except Exception as e:
         import traceback
@@ -3437,9 +3546,8 @@ def edgecheck() -> int:
         except Exception:
             pass
 
-    # 别污染真实配置：Store 在构造时就按这个变量定目录
-    os.environ.setdefault("INTERLINE_DATA_DIR",
-                          str(Path(tempfile.gettempdir()) / "interline_check"))
+    # 别污染真实配置，也别读到别的自检写下的残值：Store 在构造时就按这个变量定目录
+    check_dir = _check_data_dir("edges")
 
     rc = 0
     app = QApplication.instance() or QApplication(sys.argv[:1])
@@ -3451,6 +3559,7 @@ def edgecheck() -> int:
         st = store_mod.Store()
         st.set("pet.snap_dir", "")      # 从「没贴过」开始，别让上次的边干扰
         log(f"version = {BUILD_VERSION}")
+        log(f"data dir = {check_dir}（每次清空，不读用户配置）")
 
         # ---- 1. 纯逻辑：方向判定
         scr = QRect(0, 0, 1280, 780)
