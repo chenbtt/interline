@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""奶读 Interline 打包配置。
+"""奶蛙阅读器 Interline 打包配置。
 
 单文件 onefile，不启用 UPX：onefile 本身已 deflate，UPX 净收益约 10%，
 但会让每次启动多一层解压、易被误报、Qt 的大 DLL 被压后偶发加载失败。

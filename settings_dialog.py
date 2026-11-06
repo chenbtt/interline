@@ -488,7 +488,7 @@ class SettingsDialog(QDialog):
         w, lay = self._page("关于")
         import main as app_main      # 只为拿版本号，函数内导入避免循环
 
-        lay.addWidget(QLabel(f"奶读 Interline", w))
+        lay.addWidget(QLabel(f"奶蛙阅读器 Interline", w))
         ver = QLabel(f"版本 {app_main.BUILD_VERSION}", w)
         ver.setObjectName("hint")
         lay.addWidget(ver)

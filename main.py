@@ -1,4 +1,4 @@
-"""奶读 Interline —— 摸鱼电子书阅读器。
+"""奶蛙阅读器 Interline —— 摸鱼电子书阅读器。
 
 阶段 1：无边框透明置顶窗口 + TXT 阅读闭环。
 """
@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 61
+BUILD_VERSION = 62
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -505,7 +505,7 @@ class Reader(QWidget):
         hl.setContentsMargins(14, 0, 8, 0)
         hl.setSpacing(6)
 
-        self.title_label = QLabel("奶读")
+        self.title_label = QLabel("奶蛙阅读器")
         self.title_label.setObjectName("titleLabel")
         hl.addWidget(self.title_label)
 
@@ -4120,7 +4120,7 @@ def main():
 
     # 托盘
     tray = QSystemTrayIcon(make_icon(), app)
-    tray.setToolTip("奶读")
+    tray.setToolTip("奶蛙阅读器")
     tmenu = QMenu()
     tmenu.addAction("显示 / 隐藏").triggered.connect(
         lambda: win._hide_window() if win.isVisible() else win._do_show())
