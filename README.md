@@ -76,9 +76,11 @@
 
 **贴边形态**
 
-拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态。八张静态图（`assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}.png`，256×256 透明 PNG）已经出好，**吸附逻辑还没接**。
+拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态，并且**会呼吸、会眨眼**：八向 × 四相位（`base` / `in` / `out` / `blink`）共 32 张 256×256 透明 PNG（`assets/naiwa/edges/`），**吸附逻辑还没接**。
 
-规格、命名、方向映射都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移。两张预览在 `screenshots/pet-edges.png`（八向拼图）和 `screenshots/pet-edges-context.png`（模拟桌面贴边）。
+呼吸的循环是 `base → in → base → out`，一步 420 ms，一轮约 1.7 秒；眨眼不进循环，隔几秒插一次 `base → blink → base`，160 ms 带过。
+
+规格、命名、方向映射、播放顺序都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移，换帧也别动窗口位置。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×4 胶片条）、`pet-edges-anim.gif`（三个方向的循环）。
 
 <p align="center">
   <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">

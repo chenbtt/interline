@@ -1,20 +1,22 @@
 """奶蛙吸附边缘素材：构建期工具（只产美术，不含吸附逻辑）。
 
-    python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图
-    python make_pet_edges.py --build    # 抠图 + 摆放 + 八个方向裁切
-    python make_pet_edges.py --sheet    # 出一张预览拼图
-    python make_pet_edges.py --context  # 出一张模拟桌面贴边的场景图
+    python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图（图生图用）
+    python make_pet_edges.py --build    # 抠图 + 摆放 + 八向四相位裁切
+    python make_pet_edges.py --sheet    # 八向 base 帧 3x3 拼图
+    python make_pet_edges.py --context  # 模拟桌面贴边的场景图
+    python make_pet_edges.py --anim     # 胶片条 + GIF，验证动画
 
-产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}.png（256x256 RGBA）
+产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}-{base,in,out,blink}.png
+      32 张 256x256 RGBA
 
-素材来源是两个目录，各取第一张：
-    build/naiwa_edges/raw/     斜姿态。出七张（四边里的三条 + 四角）
-    build/naiwa_edges/raw_n/   探身下望。只出 edge-n；缺省则退回对半切
+素材来源是两个目录，文件名带相位后缀（@in / @out / @blink）：
+    assets/naiwa/edges/src/side/   斜姿态，出七向（四边里的三条 + 四角）
+    assets/naiwa/edges/src/peek/   探身下望，只出 n；缺省则退回对半切
 
 设计约定（接入时唯一需要记住的规则）：
     画布靠窗口的那条边 == 窗口边缘。
-    edge-w 的右边缘、edge-e 的左边缘、edge-n 的下边缘、edge-s 的上边缘，
-    四角则是两条边同时贴。所以切面永远落在画布边界上，不用记偏移量。
+    w 的右边缘、e 的左边缘、n 的下边缘、s 的上边缘，四角则是两条边同时贴。
+    所以切面永远落在画布边界上，不用记偏移量。
 """
 from __future__ import annotations
 
@@ -48,6 +50,10 @@ PEEK_W = 187
 PEEK_MAX_H = 150
 
 DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
+
+# 吸附态的呼吸循环。播放顺序 base → in → base → out，眨眼帧 base→blink→base
+# 另外插进去。四个相位都要，缺哪个就退回 base，不会空窗。
+PHASES = ("base", "in", "out", "blink")
 
 
 # ---------------------------------------------------------------- 切参考帧
@@ -84,9 +90,10 @@ def _smooth(v, k: int = 11):
     return np.convolve(np.pad(v, pad, mode="edge"), np.ones(k) / k, mode="valid")
 
 
-def cutout(src: Path, size: tuple[int, int]) -> Image.Image:
-    """把模型出的图裁到角色包围盒，缩到目标高度，返回透明底 RGBA。
+def cutout(src: Path, size: tuple[int, int] = (0, 0)) -> Image.Image:
+    """把模型出的图裁到角色包围盒，返回透明底 RGBA。
 
+    size 为 0 表示不缩放（相位帧要按统一系数缩，见 _scale）。
     模型给的是深灰底，用「与四角平均色的距离」当 alpha：奶蛙通体亮黄，
     和深底差得远，阈值好定；硬阈值再用距离变换铺一层软边去锯齿。
     """
@@ -116,7 +123,9 @@ def cutout(src: Path, size: tuple[int, int]) -> Image.Image:
     box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
     cut = Image.fromarray(rgba[box[1]:box[3], box[0]:box[2]], "RGBA")
 
-    # 缩放到固定尺寸：size 里哪一项为 0 就按另一项等比算
+    # 缩放到固定尺寸：size 里哪一项为 0 就按另一项等比算，两项都 0 就不缩
+    if not size[0] and not size[1]:
+        return cut
     if size[1]:
         w = max(1, round(cut.width * size[1] / cut.height))
         return cut.resize((w, size[1]), Image.LANCZOS)
@@ -226,41 +235,101 @@ def place_peek(frog: Image.Image) -> Image.Image:
     return canvas
 
 
+def _frames(dir_path: Path) -> dict[str, Path]:
+    """读一个姿态目录里的相位帧。
+
+    文件名约定：`pose_x.png` 是基准帧，`pose_x@in.png` / `@out.png` /
+    `@blink.png` 是它的变体。@ 后面就是相位名。
+    """
+    out: dict[str, Path] = {}
+    for p in sorted(dir_path.glob("*.png")):
+        phase = p.stem.split("@", 1)[1].lower() if "@" in p.stem else "base"
+        out[phase] = p
+    return out
+
+
+def _scale(frames: dict[str, Path], *, h: int = 0, w: int = 0) -> dict[str, Image.Image]:
+    """把同一姿态的相位帧缩放到**同一个系数**。
+
+    这一步不能偷懒写成「每帧各自缩到固定高度」：吸气帧本来就比基准帧
+    高 2%，再被拉回同一高度，呼吸就被吃干净了，播起来一动不动。
+    所以先用基准帧定系数，全体乘同一个 k。
+    """
+    base = cutout(frames["base"])
+    k = (h / base.height) if h else (w / base.width)
+    out: dict[str, Image.Image] = {}
+    for phase, path in frames.items():
+        im = base if phase == "base" else cutout(path)
+        # 相位帧必须是同一构图下的重画。尺寸差太多只有两种可能：
+        # 源图分辨率不一致（我把变体降到 512、基准还留 1024，就出过一次），
+        # 或者模型干脆换了姿势。两种都不能用，直接喊出来。
+        r = im.height / base.height
+        if phase != "base" and not 0.85 < r < 1.15:
+            print(f"  ！{phase} 帧高度是基准的 {r:.0%}，八成源分辨率不一致或换了姿势")
+        out[phase] = im.resize((max(1, round(im.width * k)),
+                                max(1, round(im.height * k))), Image.LANCZOS)
+    return out
+
+
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    srcs = sorted(SRC_SIDE.glob("*.png"))
-    if not srcs:
+    side_src = _frames(SRC_SIDE) if SRC_SIDE.is_dir() else {}
+    if "base" not in side_src:
         print(f"没有素材：把图生图结果放进 {SRC_SIDE}")
         return
 
-    base = cutout(srcs[0], (0, FROG_H))
-    mirror = base.transpose(Image.FLIP_LEFT_RIGHT)
-    print(f"基准蛙 = {base.width}x{base.height}")
+    side = _scale(side_src, h=FROG_H)
+    b = side["base"]
+    print(f"侧姿态 = {b.width}x{b.height}  相位 {'/'.join(sorted(side))}")
 
     # 顶边单独一张姿态（探身下望）。没有就用对半切的老办法兜底，
     # 那种切法只剩腹部和脚，能用但看不出是蛙
-    peek = None
-    n_src = sorted(SRC_PEEK.glob("*.png")) if SRC_PEEK.is_dir() else []
-    if n_src:
-        peek = cutout(n_src[0], (PEEK_W, 0))
-        if peek.height > PEEK_MAX_H:
-            # 只留头上面一小截背，再往上都是要藏到屏幕外的
-            peek = peek.crop((0, peek.height - PEEK_MAX_H, peek.width, peek.height))
-        print(f"顶边姿态 = {peek.width}x{peek.height}  ({n_src[0].name})")
+    peek: dict[str, Image.Image] = {}
+    peek_src = _frames(SRC_PEEK) if SRC_PEEK.is_dir() else {}
+    if "base" in peek_src:
+        peek = _scale(peek_src, w=PEEK_W)
+        # 背画得太长，从顶上裁固定的一段：**每帧裁一样多**，头到切口的
+        # 距离才不会被抹平（那就是呼吸的可视部分）
+        trim = peek["base"].height - PEEK_MAX_H
+        if trim > 0:
+            peek = {p: im.crop((0, trim, im.width, im.height))
+                    for p, im in peek.items()}
+        pb = peek["base"]
+        print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}")
     else:
         print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
 
     for d in DIRS:
         cfg = SPEC[d]
-        if d == "n" and peek is not None:
-            img = place_peek(peek)
-        else:
-            frog = mirror if cfg["flip"] else base
-            img = place(frog, cfg["cut"], cfg["ratio"], cfg["valign"])
-        img.save(OUT / f"edge-{d}.png", "PNG")
-        alpha = np.asarray(img)[:, :, 3]
-        print(f"  edge-{d}.png  {img.width}x{img.height}  "
-              f"占画布 {(alpha > 8).mean()*100:.0f}%")
+        for phase in PHASES:
+            if d == "n":
+                if phase in peek:
+                    img = place_peek(peek[phase])
+                elif "base" in peek:
+                    img = place_peek(peek["base"])
+                else:
+                    img = place(side["base"], cfg["cut"], cfg["ratio"], cfg["valign"])
+            else:
+                frog = side.get(phase) or side["base"]
+                if cfg["flip"]:
+                    frog = frog.transpose(Image.FLIP_LEFT_RIGHT)
+                img = place(frog, cfg["cut"], cfg["ratio"], cfg["valign"])
+            img.save(OUT / f"edge-{d}-{phase}.png", "PNG")
+
+    # 校验：切面必须逐帧落在画布同一条边上，否则播起来切口会抖
+    print()
+    for d in DIRS:
+        line = []
+        for phase in PHASES:
+            p = OUT / f"edge-{d}-{phase}.png"
+            if not p.exists():
+                line.append(f"{phase}=缺")
+                continue
+            a = np.asarray(Image.open(p))[:, :, 3] > 8
+            ys, xs = np.where(a)
+            box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
+            line.append(f"{phase}={box}")
+        print(f"  edge-{d}: " + "  ".join(line))
 
 
 def sheet() -> None:
@@ -286,7 +355,7 @@ def sheet() -> None:
         if name is None:
             d.text((x + cell // 2 - 18, y + cell // 2 - 6), "corner", fill=(90, 98, 110))
             continue
-        img = Image.open(OUT / f"edge-{name}.png")
+        img = Image.open(OUT / f"edge-{name}-base.png")
         bg.alpha_composite(img, (x, y))
         d.text((x + 6, y + 6), name, fill=(150, 160, 175))
 
@@ -325,7 +394,7 @@ def context() -> None:
         "s":  (W // 2 - c // 2, sy1 - c), "se": (sx1 - c, sy1 - c),
     }
     for name, (x, y) in spots.items():
-        fig = Image.open(OUT / f"edge-{name}.png")
+        fig = Image.open(OUT / f"edge-{name}-base.png")
         img.alpha_composite(fig, (x, y))
         # 标签放在蛙内侧，避免压到画面主体
         lx = x + c + 8 if x < W // 2 else x - 60
@@ -337,6 +406,61 @@ def context() -> None:
     print(f"场景预览 = {out}  ({img.width}x{img.height})")
 
 
+def anim() -> None:
+    """动画预览：一张胶片条 + 一个 GIF。
+
+    胶片条看的是**切面有没有逐帧位移**（每格右下角压着窗口示意边），
+    GIF 看的是动起来是不是那个意思。两张缺一不可，光看静帧判断不了。
+    """
+    from PIL import ImageDraw
+
+    cell, gap, pad, gut, top = 118, 6, 18, 34, 20
+    cols, rows = len(PHASES), len(DIRS)
+    w = pad * 2 + gut + cols * (cell + gap) - gap
+    h = pad * 2 + top + rows * (cell + gap) - gap
+    bg = Image.new("RGBA", (w, h), (24, 27, 32, 255))
+    d = ImageDraw.Draw(bg)
+
+    for ci, phase in enumerate(PHASES):
+        d.text((pad + gut + ci * (cell + gap) + 2, pad + 4), phase, fill=(140, 150, 165))
+    for ri, name in enumerate(DIRS):
+        y = pad + top + ri * (cell + gap)
+        d.text((pad, y + cell // 2 - 4), name, fill=(140, 150, 165))
+        for ci, phase in enumerate(PHASES):
+            p = OUT / f"edge-{name}-{phase}.png"
+            if not p.exists():
+                continue
+            x = pad + gut + ci * (cell + gap)
+            bg.alpha_composite(Image.open(p).resize((cell, cell), Image.LANCZOS), (x, y))
+            d.rectangle([x, y, x + cell - 1, y + cell - 1], outline=(50, 56, 66, 255))
+
+    out = HERE / "screenshots" / "pet-edges-frames.png"
+    bg.convert("RGB").save(out)
+    print(f"胶片条 = {out}  ({bg.width}x{bg.height})")
+
+    # GIF 只放三个方向：左边贴墙、底边探头、顶边探身，覆盖三种典型姿态
+    picks = ("w", "s", "n")
+    frames = []
+    for phase in PHASES:
+        fr = Image.new("RGBA", (len(picks) * CANVAS, CANVAS), (16, 18, 22, 255))
+        fd = ImageDraw.Draw(fr)
+        for i, name in enumerate(picks):
+            x0 = i * CANVAS
+            fd.rectangle([x0 + 4, 4, x0 + CANVAS - 5, CANVAS - 5],
+                         fill=(24, 27, 32, 255), outline=(52, 58, 68, 255))
+            fd.text((x0 + 12, 12), name, fill=(130, 140, 155))
+            p = OUT / f"edge-{name}-{phase}.png"
+            if p.exists():
+                fr.alpha_composite(Image.open(p), (x0, 0))
+        fd.text((12, CANVAS - 22), phase, fill=(130, 140, 155))
+        frames.append(fr.convert("RGB"))
+    gif = HERE / "screenshots" / "pet-edges-anim.gif"
+    # 呼吸两个相位慢一点，眨眼一帧带过，凑成一个能看出节奏的循环
+    frames[0].save(gif, save_all=True, append_images=frames[1:],
+                   duration=[420, 420, 420, 160], loop=0, optimize=False)
+    print(f"GIF = {gif}  ({gif.stat().st_size // 1024} KB，{len(frames)} 帧)")
+
+
 if __name__ == "__main__":
     if "--prep" in sys.argv:
         prep()
@@ -346,5 +470,7 @@ if __name__ == "__main__":
         sheet()
     elif "--context" in sys.argv:
         context()
+    elif "--anim" in sys.argv:
+        anim()
     else:
         print(__doc__)
