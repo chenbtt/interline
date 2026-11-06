@@ -23,7 +23,7 @@ from PyQt6.QtGui import QImage, QPixmap, qAlpha
 
 import assets
 
-SNAP = 64                 # 吸附阈值：蛙到屏幕边的距离（画布 256 的 1/4）
+SNAP = 10                 # 吸附阈值：蛙到屏幕边的距离；只在几乎贴到边上才吸
 BLINK_GAP_MS = (2000, 4000)
 BLINK_MS = 160.0
 

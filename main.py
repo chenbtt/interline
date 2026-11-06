@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 58
+BUILD_VERSION = 59
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2171,8 +2171,8 @@ class Reader(QWidget):
             w.request_library.connect(self._pet_open_library)
             w.request_settings.connect(self._open_settings)
             w.exit_pet.connect(self._exit_pet)
-            w.hide_pet.connect(self._pet_hide)
-            w.show_main.connect(self._pet_show_main)
+            w.collapse_bubble.connect(self._pet_collapse_bubble)
+            w.show_main.connect(self._pet_toggle_main)
             w.quit_app.connect(QApplication.instance().quit)
             w.sound_started.connect(self._pet_duck_start)
             w.notice.connect(lambda s: self._set_hint(s, 4000))
@@ -2202,21 +2202,26 @@ class Reader(QWidget):
         self._do_show()
         self.set_mode("books")
 
-    def _pet_hide(self):
-        """气泡按钮「隐藏奶蛙」：只收窗，朗读照旧。
+    def _pet_collapse_bubble(self):
+        """气泡按钮「收起气泡」：只收气泡，蛙和朗读都照旧留在桌面上。
 
-        不退出奶读模式，否则声音还在、按钮却连着窗口一起没了，等于把
-        「继续听」也一起关掉。唤回走 F8 / 底栏蛙头（见 toggle_pet）。
+        和「显示/收起主面板」是两件事——一个管奶蛙自己，一个管阅读器。
+        收起态工具条还在，同一颗按钮变成向上折角，再点一次就展开。
         """
-        if self._pet_window is not None:
-            self._pet_window.suspend()
-        self._set_hint("奶蛙已隐藏，F8 / 托盘 / 主窗蛙头都能唤回", 3200)
+        w = self._pet_window
+        if w is None:
+            return
+        on = not bool(self.st.get("pet.show_bubble", True))
+        w.set_bubble_visible(on)
+        self._set_hint("气泡已收起，再点同一颗按钮展开" if not on
+                       else "气泡回来了", 2600)
 
-    def _pet_show_main(self):
-        """气泡按钮「显示主面板」：只把阅读器叫到前面，不打招呼、不抢朗读。"""
-        self.show()
-        self.raise_()
-        self.activateWindow()
+    def _pet_toggle_main(self):
+        """气泡按钮「主面板」：显示时收起、隐藏时打开，别只认「叫到前面」。"""
+        if self.isVisible():
+            self._hide_window()          # 只收阅读界面；蛙不跟着藏
+        else:
+            self._do_show()
 
     def _enter_pet(self):
         if self._pet:
@@ -2741,8 +2746,8 @@ def selftest() -> int:
             # 只查类和方法是否存在，不构造 QWidget（见下面 TTS 与 QPixmap 的坑）
             import pet_window
             need = ("start", "stop", "set_text", "fx", "suspend", "resume",
-                    "unsnap", "set_scale", "relayout",
-                    "_toolbar", "_emit_tool", "hide_pet", "show_main")
+                    "unsnap", "set_scale", "relayout", "set_bubble_visible",
+                    "_toolbar", "_emit_tool", "collapse_bubble", "show_main")
             lacking = [n for n in need
                        if not hasattr(pet_window.PetWindow, n)]
             log(f"pet window= {'OK' if not lacking else 'MISSING ' + str(lacking)}")
@@ -3123,7 +3128,7 @@ def toolcheck() -> int:
         got: list[tuple] = []
         win.step.connect(lambda d: got.append(("step", d)))
         win.bubble_clicked.connect(lambda: got.append(("play",)))
-        win.hide_pet.connect(lambda: got.append(("hide",)))
+        win.collapse_bubble.connect(lambda: got.append(("hide",)))
         win.show_main.connect(lambda: got.append(("main",)))
         expect = {"prev": ("step", -1), "next": ("step", 1),
                   "play": ("play",), "hide": ("hide",), "main": ("main",)}
@@ -3166,6 +3171,173 @@ def toolcheck() -> int:
         log(f"  真鼠标链 亮起 {on_bubble} / 移到按钮 {on_button} / 不当拖拽 "
             f"{no_drag} / 点击生效 {clicked} / 移开熄灭 {off_ok} "
             f"{'ok' if ok else '??'}")
+
+        # ---- v59：吸附态工具条 / 行数变化 / 收起气泡 / 主面板切换
+        import pet_edge
+
+        ok = pet_edge.SNAP == 10
+        rc |= 0 if ok else 2
+        log(f"  吸附阈值 = {pet_edge.SNAP}px {'ok' if ok else '?? 期望 10'}")
+
+        t3 = ("他的问题是他同时还是一个极为罕见的报时人，我和科林斯都上当了，"
+              "不然几年前我就该买苹果的；")
+        t2 = "你怎么看我的理解？你能简单说说“利润之外”追求对公司的好处在哪里么？"
+        mock = QRect(0, 0, 1280, 780)
+        anchors = {
+            "nw": QPoint(60, 60), "n": QPoint(640, 40), "ne": QPoint(1220, 60),
+            "w": QPoint(40, 400), "e": QPoint(1240, 300),
+            "sw": QPoint(60, 720), "s": QPoint(560, 740), "se": QPoint(1220, 720),
+        }
+        edge_ok = True
+        for d, a in anchors.items():
+            win._edge_dir = ""
+            win._snap_to(d, a, animate=False, screen=mock)
+            sz, bub, _cv = win._metrics()
+            rs, zn = win._toolbar()
+            band = QRect(win._band)
+            inside = (len(rs) == 5 and all(
+                0 <= r.left() and r.right() < sz.width()
+                and 0 <= r.top() and r.bottom() < sz.height()
+                for r in rs.values()))
+            flush = (band.bottom() == sz.height() - 1 or band.top() == 0)
+            gapless = (bub is None or band.top() == bub.bottom() + 1
+                       or band.bottom() + 1 == bub.top())
+            path = (bub is None or zn.contains(bub.center()))
+            good = inside and flush and gapless and path
+            edge_ok &= good
+            if not good:
+                log(f"    {d:<3} 按钮{len(rs)} 窗内{inside} 齐边{flush} "
+                    f"无缝{gapless} 气泡在带内{path}")
+        rc |= 0 if edge_ok else 2
+        log(f"  八向吸附工具条 齐边无缝 {edge_ok} "
+            f"{'ok' if edge_ok else '??'}")
+
+        # 顶部贴边 3 行 → 2 行：窗口 / 画布 / 蛙 / 工具带一寸都不动
+        win._edge_dir = ""
+        win.set_text(t3)
+        win._snap_to("n", QPoint(640, 40), animate=False, screen=mock)
+        g3 = win.geometry()
+        _s3, b3, cv3 = win._metrics()
+        fr3 = win._frog_rect()
+        band3 = QRect(win._band)
+        rs3, _zn3 = win._toolbar()
+        win.set_text(t2)
+        g2 = win.geometry()
+        _s2, b2, cv2 = win._metrics()
+        fr2 = win._frog_rect()
+        band2 = QRect(win._band)
+        rs2, _zn2 = win._toolbar()
+        same = (g3 == g2 and cv3 == cv2 and fr3 == fr2 and b3 == b2
+                and band3 == band2 and rs3 == rs2)
+        rc |= 0 if same else 2
+        log(f"  顶部贴边 3→2 行 窗口/画布/蛙/按钮全不动 {same} "
+            f"{'ok' if same else '??'}")
+        flush2 = (b2 is not None and band2.top() == b2.bottom() + 1
+                  and band2.bottom() == _s2.height() - 1)
+        rc |= 0 if flush2 else 2
+        log(f"  气泡下沿接工具带、工具带铺到窗口底 {flush2} "
+            f"{'ok' if flush2 else '??'}")
+
+        # 吸附态悬停连续性：气泡 → 缝 → 按钮三步都亮着，中途误报 leave 也不灭
+        win._set_tools(False)
+        steps = [b2.center(), QPoint(b2.center().x(), b2.bottom() + 1),
+                 rs2["play"].center()]
+        chain = True
+        for pt in steps:
+            send(QEvent.Type.MouseMove, pt)
+            chain &= win._tools_on
+        QApplication.sendEvent(win, QEvent(QEvent.Type.Leave))
+        grace = win._tools_on and win._leave_timer.isActive()
+        send(QEvent.Type.MouseMove, rs2["play"].center())
+        back = win._tools_on and not win._leave_timer.isActive()
+        ok = chain and grace and back
+        rc |= 0 if ok else 2
+        log(f"  吸附态悬停链 三步常亮 {chain} / 误报宽限 {grace} / "
+            f"回来续上 {back} {'ok' if ok else '??'}")
+
+        # 收起气泡：按钮还在，同一颗能把自己展开回来
+        win.set_bubble_visible(False)
+        rs_c, _zn_c = win._toolbar()
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        hit_c = bool(rs_c) and win._hit(rs_c["hide"].center()) == "tool:hide"
+        ok_c = (len(rs_c) == 5 and hit_c
+                and not bool(st.get("pet.show_bubble", True)))
+        rc |= 0 if ok_c else 2
+        log(f"  收起气泡 按钮仍可点 {ok_c} {'ok' if ok_c else '??'}")
+        win.set_bubble_visible(True)
+
+        # 吸附态收起/展开：画布（切口）一寸都不能挪
+        win._edge_dir = ""
+        win.set_text(t3)
+        win._snap_to("s", QPoint(560, 740), animate=False, screen=mock)
+        cg0 = win._metrics()[2].translated(win.geometry().topLeft())
+        win.set_bubble_visible(False)
+        cg1 = win._metrics()[2].translated(win.geometry().topLeft())
+        win.set_bubble_visible(True)
+        cg2 = win._metrics()[2].translated(win.geometry().topLeft())
+        ok = cg0 == cg1 == cg2
+        rc |= 0 if ok else 2
+        log(f"  吸附态收起→展开 画布不挪 {ok} "
+            + ("ok" if ok else f"?? {cg0} / {cg1} / {cg2}"))
+
+        # 两个按钮的职责：一个收气泡、一个切主面板，都能来回拨
+        class _FakeReader:
+            def __init__(self, store, w):
+                self.st, self._pet_window = store, w
+                self.v, self.calls, self.hints = False, [], []
+
+            def isVisible(self):
+                return self.v
+
+            def _hide_window(self):
+                self.calls.append("hide")
+                self.v = False
+
+            def _do_show(self):
+                self.calls.append("show")
+                self.v = True
+
+            def _set_hint(self, s, ms):
+                self.hints.append(s)
+
+        fake = _FakeReader(st, win)
+        Reader._pet_toggle_main(fake)
+        Reader._pet_toggle_main(fake)
+        toggle_ok = fake.calls == ["show", "hide"]
+        rc |= 0 if toggle_ok else 2
+        log(f"  主面板按钮 显示→收起切换 {toggle_ok} "
+            f"{'ok' if toggle_ok else '??'}")
+        Reader._pet_collapse_bubble(fake)
+        off = not bool(st.get("pet.show_bubble", True))
+        Reader._pet_collapse_bubble(fake)
+        on = bool(st.get("pet.show_bubble", True))
+        ok = off and on
+        rc |= 0 if ok else 2
+        log(f"  收起按钮 收起→展开往返 {ok} {'ok' if ok else '??'}")
+
+        # 顶部贴边工具条出图，供 README 引用
+        win.set_text(t3)
+        win._snap_to("n", QPoint(640, 40), animate=False, screen=mock)
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        epm = win.grab()
+        eb = QImage(epm.width() + 40, epm.height() + 40,
+                    QImage.Format.Format_RGB32)
+        eb.fill(QColor("#12161b"))
+        ep = QPainter(eb)
+        ep.drawPixmap(20, 20, epm)
+        ep.end()
+        eshot = here / "screenshots" / "pet-edge-tools.png"
+        eshot = eshot if eshot.parent.is_dir() else (
+            Path(tempfile.gettempdir()) / "interline_edge_tools.png")
+        ok = bool(eb.save(str(eshot)))
+        rc |= 0 if ok else 2
+        log(f"  吸附工具条预览 = {eshot}" if ok else "  吸附工具条预览 = 保存失败")
+
+        # 回站立形态，后面的播放/暂停图标与预览图仍按开头那套坐标验
+        win._edge_dir = ""
+        win.set_text(text)
         win._set_tools(True)
         win._tools_alpha = 1.0
 
@@ -3284,11 +3456,13 @@ def edgecheck() -> int:
         scr = QRect(0, 0, 1280, 780)
         fw, fh = 173, 187
         cases = [
-            ("左上角", 10, 12, "nw"), ("上边中", 600, 8, "n"),
+            ("左上角", 8, 8, "nw"), ("上边中", 600, 8, "n"),
+            ("偏上 11px", 600, 11, ""), ("偏上 10px", 600, 10, "n"),
             ("右上角", 1280 - fw - 6, 5, "ne"), ("左边中", 4, 400, "w"),
             ("右边中", 1280 - fw - 3, 400, "e"), ("左下角", 8, 780 - fh - 4, "sw"),
             ("下边中", 500, 780 - fh - 10, "s"), ("右下角", 1280 - fw - 2, 780 - fh - 2, "se"),
-            ("偏左 65px", 65, 400, ""), ("偏左 63px", 63, 400, "w"),
+            ("偏左 11px", 11, 400, ""), ("正好 10px", 10, 400, "w"),
+            ("偏左 9px", 9, 400, "w"),
             ("正中", 500, 300, ""), ("拖出屏幕左", -50, 400, "w"),
         ]
         for name, x, y, want in cases:

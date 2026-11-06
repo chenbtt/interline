@@ -539,7 +539,8 @@ TOOL_IDS = ("prev", "play", "next", "hide", "main")
 
 
 def _tool_glyph(p: QPainter, rect: QRect, kind: str,
-                color: QColor, playing: bool) -> None:
+                color: QColor, playing: bool,
+                collapsed: bool = False) -> None:
     s = rect.width() / 22.0
 
     def X(v):
@@ -582,10 +583,14 @@ def _tool_glyph(p: QPainter, rect: QRect, kind: str,
             p.drawRect(QRectF(X(12.7), Y(5.6), 2.8 * s, 10.8 * s))
         else:
             tri((7.5, 5.2), (7.5, 16.8), (16.2, 11))
-    elif kind == "hide":                     # 收起：向下折角 + 底线
+    elif kind == "hide":                     # 收起 / 展开：折角 + 底线
         p.setBrush(Qt.BrushStyle.NoBrush)
-        line((5.5, 8.5), (11, 13.5), (16.5, 8.5))
-        line((5, 16.5), (17, 16.5))
+        if collapsed:                        # 已收起 → 向上折角 + 顶线
+            line((5.5, 13.5), (11, 8.5), (16.5, 13.5))
+            line((5, 5.5), (17, 5.5))
+        else:
+            line((5.5, 8.5), (11, 13.5), (16.5, 8.5))
+            line((5, 16.5), (17, 16.5))
     elif kind == "main":                     # 主面板：窗口 + 标题栏
         p.setBrush(Qt.BrushStyle.NoBrush)
         box = QPainterPath()
@@ -596,7 +601,8 @@ def _tool_glyph(p: QPainter, rect: QRect, kind: str,
 
 
 def draw_tool_button(p: QPainter, rect: QRect, kind: str, st,
-                     hover: bool = False, playing: bool = False) -> None:
+                     hover: bool = False, playing: bool = False,
+                     collapsed: bool = False) -> None:
     """一颗气泡工具按钮：圆角底片 + 单色图标。底色沿用气泡，随主题走。"""
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -609,5 +615,5 @@ def draw_tool_button(p: QPainter, rect: QRect, kind: str, st,
     p.setPen(QPen(theme.overlay_pen(st, 90 if hover else 40), 1.0))
     p.setBrush(bg)
     p.drawRoundedRect(bodyf, 5, 5)
-    _tool_glyph(p, rect, kind, fg, playing)
+    _tool_glyph(p, rect, kind, fg, playing, collapsed)
     p.restore()

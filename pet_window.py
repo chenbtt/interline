@@ -22,7 +22,7 @@ from __future__ import annotations
 import time
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QColor, QCursor, QPainter
 from PyQt6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
 
 import pet
@@ -36,20 +36,24 @@ GREET_DELAY_MS = 200   # 出现后隔多久打招呼（让首帧和音频链路�
 SNAP_ANIM_MS = 150     # 吸附时滑过去的时间
 TAIL_HEAD = 0.18       # 吸附态气泡尾巴的落点：可见盒从上往下 18% 处（嘴的位置）
 
-# 气泡悬停工具条：左三（上一句 / 播放切换 / 下一句）、右二（隐藏奶蛙 / 显示主面板）
+# 气泡悬停工具条：左三（上一句 / 播放切换 / 下一句）、右二（收起气泡 / 主面板切换）
 TOOL_BTN = 22          # 单颗按钮边长
 TOOL_GAP = 6           # 组内间距
-TOOL_INSET = 4         # 距窗口左右边
-TOOL_Y_GAP = 3         # 距气泡底边
+TOOL_INSET = 4         # 距工具带左右边
+TOOL_Y_GAP = 2         # 距气泡边：贴着放，别留一段让指针掉出去的死区
+TOOL_PAD = 4           # 按钮下沿留白
+TOOL_BAND = TOOL_Y_GAP + TOOL_BTN + TOOL_PAD   # 工具带整体高度 28
+TOOL_MARGIN = 6        # 悬停带四周外扩：指针压到按钮边缘也不熄灭
 TOOL_FADE_MS = 130     # 淡入淡出时长
+TOOL_LEAVE_MS = 180    # 脱离窗口的宽限：系统偶发一次 leave 不该让工具条消失
 TOOL_LEFT = ("prev", "play", "next")
 TOOL_RIGHT = ("hide", "main")
 TOOL_TIPS = {
     "prev": "上一句",
     "play": "开始 / 停止朗读",
     "next": "下一句",
-    "hide": "隐藏奶蛙（F8 / 托盘 / 主窗蛙头唤回）",
-    "main": "显示主面板",
+    "hide": "收起气泡（再点展开）",
+    "main": "显示 / 收起主面板",
 }
 TOOL_TIP_DELAY_MS = 420
 
@@ -64,8 +68,8 @@ class PetWindow(QWidget):
     request_settings = pyqtSignal()
     exit_pet = pyqtSignal()
     quit_app = pyqtSignal()
-    hide_pet = pyqtSignal()             # 只藏蛙，朗读照旧；F8 或主窗蛙头唤回
-    show_main = pyqtSignal()            # 把阅读器叫到前面
+    collapse_bubble = pyqtSignal()      # 收起 / 展开气泡；蛙照旧留在桌面上
+    show_main = pyqtSignal()            # 主面板显示 / 收起切换
     sound_started = pyqtSignal(int)     # 音效时长，让主窗压低朗读
     moved = pyqtSignal(int, int)        # 拖完存位置
     notice = pyqtSignal(str)
@@ -88,12 +92,16 @@ class PetWindow(QWidget):
         self._drag = None
         self._last_ms = 0.0
         self._idle_ms = 0.0
-        # 悬停工具条：只在站立形态出现，指针从气泡移到按钮的整条带上都算「还在」
+        # 悬停工具条：站立 / 吸附两种形态都有；_band 是按钮占的那条横带，
+        # _bridge 是铺了 alpha=1 的命中桥（透明像素在 Windows 不接鼠标，
+        # 不铺的话指针一进气泡与按钮之间的缝就会掉到桌面、触发 leave）
         self._tools_on = False
         self._tools_alpha = 0.0
         self._tool_hover = ""
         self._tool_press = ""
         self._tool_tip_at = QPoint()
+        self._band = QRect()
+        self._bridge = QRect()
 
         self.setWindowFlags(Qt.WindowType.Tool
                             | Qt.WindowType.FramelessWindowHint)
@@ -114,6 +122,9 @@ class PetWindow(QWidget):
         self._tip_timer = QTimer(self)
         self._tip_timer.setSingleShot(True)
         self._tip_timer.timeout.connect(self._show_tool_tip)
+        self._leave_timer = QTimer(self)
+        self._leave_timer.setSingleShot(True)
+        self._leave_timer.timeout.connect(self._finish_leave)
 
     # -------------------------------------------------- 生命周期
 
@@ -161,6 +172,7 @@ class PetWindow(QWidget):
         self._set_tools(False)
         self._tools_alpha = 0.0
         self._tip_timer.stop()
+        self._leave_timer.stop()
         QToolTip.hideText()
         self.save_pos()
         # 收起前把吸附态清掉：下次 start() 会按配置重新贴，
@@ -179,6 +191,7 @@ class PetWindow(QWidget):
         self._set_tools(False)
         self._tools_alpha = 0.0
         self._tip_timer.stop()
+        self._leave_timer.stop()
         QToolTip.hideText()
         self.hide()
 
@@ -244,29 +257,41 @@ class PetWindow(QWidget):
         return frog.translated(self.geometry().topLeft())
 
     def _edge_layout(self):
-        """吸附态排版：(窗口尺寸, 气泡矩形, 画布矩形)，顺带记下尾巴朝向。
+        """吸附态排版：(窗口尺寸, 气泡矩形, 画布矩形)，顺带记下尾巴与工具带。
 
         气泡放**屏幕内侧**：蛙贴在边上，气泡往屋里伸，尾巴从朝向蛙的那一侧
         伸出来指着头。窗口里画布永远顶着切口那一侧，所以「画布贴屏幕边」
-        这条硬规则不用因为加气泡而改，`pet_edge.snap_pos` 也因此不用改口径。
+        这条硬规则不用因为加气泡而改，`pet_edge.snap_pos` 也不用改口径。
 
-        接的是**蛙可见的那条边**，不是画布边：256 的画布里蛙只占一条
-        （w 的可见盒 `base` 只有 70px 宽），按画布边摆气泡会离蛙一大截。
-        用全相位并集盒 `box` 而不是 `base`：抬手帧手会往外伸 35px，
-        按 base 摆的话那只手会被气泡压住。
+        v59 的关键改动：**窗口几何不跟着句子行数变**。旧版气泡高度由正文
+        行数决定，`hgt = max(c, by + bh)` 在 3 行→2 行时被夹回画布高度，
+        气泡底下凭空多出十几像素透明带，就是「底部裂了一条缝」。现在气泡
+        固定占满 BUBBLE_MAX_LINES 行的槽位（正文最多也就这么多行），
+        工具带接在气泡背离蛙的那一侧，窗口尺寸恒定。换句只换气泡里的字，
+        画布（切口）、蛙、五颗按钮全都不动——这才是「奶蛙位置保持不动，
+        由气泡调整自身位置适配」。
 
-        `self._tail` 存 (朝向, 落点)，落点是尾巴那条边上的坐标（朝上下是 x，
-        朝左右是 y）。paintEvent 直接拿去画。
+        工具带方向：上下贴边时，气泡在蛙的下/上方，工具带就接在气泡再往外
+        的一侧（顶部贴边在气泡下方，底部贴边在气泡上方）；左右贴边时气泡
+        在蛙旁边，工具带接气泡下沿、并贴着气泡的左右沿排按钮，不压蛙身。
+        工具带一直延伸到窗口边，窗口底/顶不会出现空带。
         """
         c = self.edge.size().width()
         canvas = QRect(0, 0, c, c)
         self._tail = ("down", None)
-        if not (bool(self.st.get("pet.show_bubble", True)) and self._text):
-            return QSize(c, c), None, canvas
+        self._band = QRect()
 
-        body = pet.measure_bubble(self._font_factory(), self._text,
-                                  int(self.st.get("pet.bubble_w", 360)))
-        bw, bh = body.width(), body.height()
+        font = self._font_factory()
+        max_w = int(self.st.get("pet.bubble_w", 360))
+        show = bool(self.st.get("pet.show_bubble", True)) and bool(self._text)
+        # 吸附态气泡宽高都固定：换句只换气泡里的字，窗口一寸都不动。
+        # 宽度取设置里的上限（正文会自动在这条宽度里重排），高度取正文最多
+        # 能占的行数——两者都跟当前这句无关，才谈得上「位置保持不动」。
+        bw = max(max_w, 5 * TOOL_BTN + 4 * TOOL_GAP + 2 * TOOL_INSET)
+        bh = (pet.BUBBLE_MAX_LINES * pet.line_height(font)
+              + 2 * pet.BUBBLE_PAD_Y) if show else 0
+        block = bh + TOOL_BAND
+
         h, v = pet_edge.PIN.get(self._edge_dir, ("", ""))
         t, pad = pet.BUBBLE_TAIL, BUBBLE_PAD
         geo = self.edge.geo(self._edge_dir) or {}
@@ -285,30 +310,58 @@ class PetWindow(QWidget):
                 # 反过来：气泡接在可见部分的左边，画布得留在窗口右端
                 w = max(c, c - round(box[0] * k) + t + pad + bw)
                 bx = w - c + round(box[0] * k) - t - pad - bw
-            hgt = max(c, bh)
-            cy = hgt - c if v == "B" else 0 if v == "T" else (hgt - c) // 2
+            # 画布的 y 由 hgt 决定，hgt 又由气泡块决定：迭代几轮就收敛，
+            # 起始取 c。收敛后窗口高度恒定，换句不会重排。
+            mouth_y = round((base[1] + (base[3] - base[1]) * TAIL_HEAD) * k)
+            hgt = c
+            for _ in range(6):
+                cy = (hgt - c if v == "B" else 0 if v == "T"
+                      else (hgt - c) // 2)
+                head = cy + mouth_y
+                # 气泡（不是整块）对着嘴，工具带接在它下面；至少留 2px，
+                # 别让气泡顶部的圆角被窗口上沿切掉
+                by = max(2, min(head - bh // 2, hgt - block))
+                new_hgt = max(c, by + block)
+                if new_hgt == hgt:
+                    break
+                hgt = new_hgt
+            cy = (hgt - c if v == "B" else 0 if v == "T"
+                  else (hgt - c) // 2)
             canvas = QRect(0 if cut == "left" else w - c, cy, c, c)
-            # 尾巴对着嘴：可见盒从上往下 18% 就是嘴的位置（量过 w/e/sw/se），
-            # 对准盒子中点会指到肚子上，看着像在跟肚子说话
-            head = canvas.top() + round(
-                (base[1] + (base[3] - base[1]) * TAIL_HEAD) * k)
-            by = max(0, min(head - bh // 2, hgt - bh))
+            head = cy + mouth_y
             self._tail = ("left" if cut == "left" else "right", head)
-            return QSize(w, hgt), QRect(bx, by, bw, bh), canvas
+            bubble = QRect(bx, by, bw, bh) if show else None
+            # 工具带从气泡下沿一直铺到窗口下沿，按钮贴气泡左右沿
+            self._band = QRect(bx, by + bh, bw, max(TOOL_BAND, hgt - by - bh))
+            return QSize(w, hgt), bubble, canvas
 
         # 上下贴边：画布水平居中（气泡比蛙宽时蛙才不会偏一边）
         if cut == "top":
             by = round(box[3] * k) + t + pad
-            hgt = max(c, by + bh)
+            hgt = max(c, by + block)
+            cy = 0
+            band_y = by + bh
+            band_h = hgt - band_y
         else:
-            hgt = max(c, c - round(box[1] * k) + t + pad + bh)
-            by = hgt - c + round(box[1] * k) - t - pad - bh
+            a = round(box[1] * k)
+            extra = max(0, block + t + pad - a)
+            hgt = c + extra
+            cy = extra
+            be = cy + a - t - pad            # 气泡下沿（贴着蛙可见上沿）
+            by = be - bh
+            if show:
+                band_y, band_h = 0, by        # 工具带在气泡上方，铺到窗口顶
+            else:
+                # 气泡收起后按钮得挨着蛙，别孤零零挂在窗口顶
+                band_y, band_h = max(0, be - TOOL_BAND), TOOL_BAND
         w = max(c, bw)
-        canvas = QRect((w - c) // 2, 0 if cut == "top" else hgt - c, c, c)
+        canvas = QRect((w - c) // 2, cy, c, c)
         head = canvas.left() + round((base[0] + base[2]) / 2 * k)
         bx = max(0, min(head - bw // 2, w - bw))
         self._tail = ("up" if cut == "top" else "down", head)
-        return QSize(w, hgt), QRect(bx, by, bw, bh), canvas
+        bubble = QRect(bx, by, bw, bh) if show else None
+        self._band = QRect(bx, band_y, bw, max(TOOL_BAND, band_h))
+        return QSize(w, hgt), bubble, canvas
 
     def _canvas_global(self) -> QPoint:
         """画布（不是窗口）左上角的全局坐标。换气泡、改字号时以它为准不动。"""
@@ -335,7 +388,7 @@ class PetWindow(QWidget):
         geo = self.edge.geo(d)
         if geo is None:
             return False
-        # 贴边形态不摆工具条，别让站立态亮着的条子残留一个空状态机
+        # 形态切换时按钮会换位置，先收干净，等指针再指过来重新点亮
         self._set_tools(False)
         self._tools_alpha = 0.0
         self._edge_dir = d
@@ -445,31 +498,61 @@ class PetWindow(QWidget):
     # -------------------------------------------------- 气泡悬停工具条
 
     def _toolbar(self):
-        """(按钮矩形表, 连续悬停带)。
+        """(按钮矩形表, 连续悬停带)。站立 / 吸附 / 气泡收起三种形态都给按钮。
 
-        按钮排在气泡下面一行：三颗贴窗口左边、两颗贴右边，中间留给蛙头。
-        站立帧的头部实际只有约 45px 宽（173px 的框里大半是透明的），
-        所以哪怕气泡很窄、窗口只有蛙那么宽，两边也放得下——**不要**为工具条
-        把窗口撑大，撑出来的透明区一样会拦鼠标，等于凭空多一块点不到的桌面。
+        按钮排在一条「工具带」上：左三贴左沿、右二贴右沿，中间留给蛙头。
+        吸附态工具带和气泡同宽（左右贴边时气泡只占窗口一侧），按钮因此
+        不会压到蛙身；顶部贴边时它正好落在气泡下方那条横带上。
+
+        v59 修悬停连续性的关键是**没有缝**：工具带从气泡边界直接
+        开始，气泡本身是不透明底片，两者之间没有一格透明像素。悬停带 zone
+        是气泡（含尾巴）与工具带的并集再外扩一圈，指针从气泡走到按钮的
+        每一步都在里面。另外 `self._bridge` 会在这条带上铺一层 alpha=1 的
+        底——Windows 分层窗口对 alpha=0 不做命中测试，不铺的话指针一进
+        缝就掉到桌面、leaveEvent 立刻把按钮熄灭。
         """
-        if self._edge_dir or not self._text:
+        if not self._text:
+            self._band = QRect()
+            self._bridge = QRect()
             return {}, QRect()
         size, bubble, _frog = self._metrics()
-        if bubble is None:
+        if self._edge_dir:
+            band = self._band                  # _edge_layout() 刚算好
+        elif bubble is not None:
+            band = QRect(0, bubble.bottom(), size.width(), TOOL_BAND)
+        else:
+            band = QRect(0, size.height() - TOOL_BAND,
+                         size.width(), TOOL_BAND)
+        self._band = band
+        if band.isEmpty():
+            self._bridge = QRect()
             return {}, QRect()
-        y = bubble.bottom() + TOOL_Y_GAP
+
+        y = band.y() + TOOL_Y_GAP
         step = TOOL_BTN + TOOL_GAP
         lw = len(TOOL_LEFT) * step - TOOL_GAP
         rw = len(TOOL_RIGHT) * step - TOOL_GAP
+        x0 = band.x() + TOOL_INSET if self._edge_dir else TOOL_INSET
+        right0 = band.x() + band.width() - TOOL_INSET - rw
         rects = {}
         for i, k in enumerate(TOOL_LEFT):
-            rects[k] = QRect(TOOL_INSET + i * step, y, TOOL_BTN, TOOL_BTN)
+            rects[k] = QRect(x0 + i * step, y, TOOL_BTN, TOOL_BTN)
         for i, k in enumerate(TOOL_RIGHT):
-            rects[k] = QRect(size.width() - TOOL_INSET - rw + i * step,
-                             y, TOOL_BTN, TOOL_BTN)
-        # 从气泡底边一直盖到按钮下沿：指针从气泡挪到按钮的途中不许熄灭
-        zone = QRect(0, bubble.bottom(), size.width(),
-                     TOOL_Y_GAP + TOOL_BTN + 6)
+            rects[k] = QRect(right0 + i * step, y, TOOL_BTN, TOOL_BTN)
+
+        zone = band.adjusted(-TOOL_MARGIN, -TOOL_MARGIN,
+                             TOOL_MARGIN, TOOL_MARGIN)
+        if bubble is not None:
+            zone = zone.united(bubble.adjusted(
+                -TOOL_MARGIN, -TOOL_MARGIN, TOOL_MARGIN,
+                TOOL_MARGIN + pet.BUBBLE_TAIL))
+        bridge = zone
+        if bubble is None:
+            # 收起气泡后从蛙身走到按钮的这一段也要接住指针
+            bridge = bridge.united(QRect(0, max(0, band.top() - 30),
+                                         size.width(), 30))
+        self._bridge = bridge.intersected(
+            QRect(0, 0, size.width(), size.height()))
         return rects, zone
 
     def _set_tools(self, on: bool) -> None:
@@ -495,8 +578,11 @@ class PetWindow(QWidget):
 
     def _show_tool_tip(self) -> None:
         if self._tools_on and self._tool_hover:
-            QToolTip.showText(self._tool_tip_at,
-                              TOOL_TIPS.get(self._tool_hover, ""), self)
+            tip = TOOL_TIPS.get(self._tool_hover, "")
+            if (self._tool_hover == "hide"
+                    and not bool(self.st.get("pet.show_bubble", True))):
+                tip = "展开气泡"
+            QToolTip.showText(self._tool_tip_at, tip, self)
 
     def _emit_tool(self, kind: str) -> None:
         if kind == "prev":
@@ -507,23 +593,26 @@ class PetWindow(QWidget):
             # 没书时走「挑一本」，有书时播 / 停，跟点气泡一致
             self.bubble_clicked.emit()
         elif kind == "hide":
-            self.hide_pet.emit()
+            self.collapse_bubble.emit()
         elif kind == "main":
             self.show_main.emit()
 
     def _hover_at(self, pos) -> None:
         """鼠标移动时按 alpha 判 hover，顺带管气泡工具条的显隐。
 
-        窗口是 256 见方，可见像素只占一成到三成，左右贴边时半边都是空的；
-        按矩形判的话指针还离蛙十几像素它就开始挥手了。
+        v59 起吸附态一样亮工具条；气泡收起时改由蛙身点亮（否则那颗
+        「展开气泡」按钮自己就没法再被点到）。
         """
-        _rects, zone = self._toolbar()
+        rects, zone = self._toolbar()
         hit = self._hit(pos)
         tool = hit[5:] if hit.startswith("tool:") else ""
-        want = (not self._edge_dir
-                and (hit == "bubble" or bool(tool)
-                     or (_rects and zone.contains(pos))))
+        _size, bubble, _frog = self._metrics()
+        want = (hit == "bubble" or bool(tool)
+                or (bubble is None and hit == "frog")
+                or (rects and zone.contains(pos)))
         self._set_tools(want)
+        if want:
+            self._leave_timer.stop()
 
         self._tool_hover = tool if self._tools_on else ""
         if self._tool_hover:
@@ -547,12 +636,23 @@ class PetWindow(QWidget):
                        else Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, ev):
-        self._set_tools(False)
+        # 分层窗口偶尔会在指针压着气泡/按钮边缘时误报一次 leave，
+        # 给 180ms 宽限；期间指针回来（_hover_at）就把定时器掐掉
+        if self._tools_on:
+            self._leave_timer.start(TOOL_LEAVE_MS)
+        else:
+            self._set_tools(False)
         self._tip_timer.stop()
         QToolTip.hideText()
         if self._edge_dir and self.edge_state.set_hover(False):
             self.update()
         super().leaveEvent(ev)
+
+    def _finish_leave(self):
+        """宽限到了还在窗外才真熄灭。"""
+        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+            return
+        self._set_tools(False)
 
     # -------------------------------------------------- 对外设置
 
@@ -683,7 +783,10 @@ class PetWindow(QWidget):
 
         frog = self.sprite.size()
         if not bool(self.st.get("pet.show_bubble", True)) or not self._text:
-            return (QSize(frog.width(), frog.height()), None,
+            # 气泡收起时留出一条工具带：不然「收起气泡」那颗按钮自己也
+            # 跟着消失，用户只能靠右键菜单把它找回来
+            h = frog.height() + (TOOL_BAND if self._text else 0)
+            return (QSize(frog.width(), h), None,
                     QRect(0, 0, frog.width(), frog.height()))
 
         max_w = int(self.st.get("pet.bubble_w", 360))
@@ -788,6 +891,13 @@ class PetWindow(QWidget):
                 p.setCompositionMode(
                     QPainter.CompositionMode.CompositionMode_SourceOver)
 
+                # 命中桥先铺：alpha=1 肉眼看不见，但 Windows 分层窗口只对
+                # 非全透明像素做命中测试。气泡与按钮之间只要有一格 alpha=0，
+                # 指针就会漏到桌面、leaveEvent 一响按钮全灭。
+                rects, _zone = self._toolbar()
+                if not self._bridge.isEmpty():
+                    p.fillRect(self._bridge, QColor(0, 0, 0, 1))
+
                 _size, bubble, box = self._metrics()
                 if self._edge_dir:
                     # 吸附态第三项是**画布**矩形：素材图贴着切口那一侧画
@@ -817,19 +927,19 @@ class PetWindow(QWidget):
                         pet.draw_pet(p, box,
                                      frames[min(self.state.frame, len(frames) - 1)])
 
-                # 工具条最后画：它压在气泡下沿与蛙头的空白带上
-                if self._tools_alpha > 0.01:
-                    rects, _ = self._toolbar()
-                    if rects:
-                        label, _enabled = self._speech_state()
-                        playing = label == "停止朗读"
-                        p.save()
-                        p.setOpacity(self._tools_alpha)
-                        for k, r in rects.items():
-                            pet.draw_tool_button(
-                                p, r, k, self.st,
-                                hover=(k == self._tool_hover), playing=playing)
-                        p.restore()
+                # 工具条最后画：它压在气泡外侧那条带上
+                if self._tools_alpha > 0.01 and rects:
+                    label, _enabled = self._speech_state()
+                    playing = label == "停止朗读"
+                    collapsed = not bool(self.st.get("pet.show_bubble", True))
+                    p.save()
+                    p.setOpacity(self._tools_alpha)
+                    for k, r in rects.items():
+                        pet.draw_tool_button(
+                            p, r, k, self.st,
+                            hover=(k == self._tool_hover), playing=playing,
+                            collapsed=collapsed)
+                    p.restore()
             finally:
                 p.end()
         except Exception:
@@ -991,8 +1101,23 @@ class PetWindow(QWidget):
         menu.addAction("退出程序").triggered.connect(self.quit_app.emit)
         menu.exec(global_pos)
 
-    def _toggle_bubble(self):
-        self.st.set("pet.show_bubble", not bool(self.st.get("pet.show_bubble", True)))
+    def set_bubble_visible(self, on: bool) -> None:
+        """收起 / 展开气泡。工具条不会跟着消失，收起态的那颗按钮负责展开。"""
+        on = bool(on)
+        if on == bool(self.st.get("pet.show_bubble", True)):
+            return
+        # 先在**旧配置**下量画布全局：改了配置再量，_canvas_global 会拿
+        # 新布局的画布偏移配旧窗口位置，吸在底边时画布会悄悄挪几像素
+        keep = self._canvas_global() if self._edge_dir else None
+        self.st.set("pet.show_bubble", on)
         self.st.save_config()
-        self._place(first=False)
+        if self._edge_dir:
+            self._reflow_edge(keep)
+        else:
+            self._place(first=False)
+        # 收起/展开会改窗口尺寸，指针可能瞬间落到窗外：别让按钮闪一下就没
+        self._leave_timer.stop()
         self.update()
+
+    def _toggle_bubble(self):
+        self.set_bubble_visible(not bool(self.st.get("pet.show_bubble", True)))
