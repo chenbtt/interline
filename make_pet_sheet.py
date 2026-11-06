@@ -30,11 +30,34 @@ SHEET_URL = ("https://raw.githubusercontent.com/timerring/codex-pet-naiwa/"
 FRAME_W, FRAME_H = 192, 208
 COLS, ROWS = 8, 11
 
-# 插帧后的列数：相邻两帧之间插一帧，帧数最多翻倍（8 -> 16）
-HI_COLS = COLS * 2
+# 输出表的最大列数。插帧最多翻倍（8 -> 16），reading 为了把口型周期
+# 拉长到两轮呼吸会到 24 列，其余行右侧留空（透明区 PNG 压得动）。
+MAX_COLS = 24
 # 质心位移小于这个值就只做淡化，不做平移补偿 —— 原地呼吸、轻微晃头
 # 的动画硬平移反而会抖
 MIN_SHIFT = 2.5
+
+# 朗读口型：24 帧 = 两轮呼吸（1.5 秒 @16fps），口型只在整段结束后重复。
+# 元项是 (宽, 高)，高 0 = 闭口，直接用素材原本那条嘴线。
+# 每一小串「微张→张→收」算一个音节，中间插长短不一的停顿；
+# 两轮的口型不一样，免得看起来像 0.75 秒一跳的复读机。
+# 口腔主色取样自 jumping 张嘴帧（暗红集中在 #100000–#300000），
+# 这里取稍亮一档的 #3E1216：面积只有十几个像素，压到纯黑会糊成一团。
+MOUTH_CYCLE = (
+    (0, 0),
+    (12, 2), (14, 5), (12, 3),          # 音节 A
+    (0, 0), (0, 0),
+    (11, 2), (15, 6), (13, 4),          # 音节 B
+    (0, 0), (0, 0), (0, 0),
+    (0, 0),
+    (13, 3), (15, 6), (12, 2),          # 音节 C
+    (0, 0), (0, 0), (0, 0), (0, 0),    # 换气，长停
+    (10, 2), (13, 4), (0, 0),          # 音节 D（轻）
+    (0, 0),
+)
+MOUTH_AT = (83.0, 34.0)       # idle 12 帧嘴线质心实测，逐帧漂移 ±2px
+MOUTH_DARK = (62, 18, 22, 240)
+MOUTH_LIT = (158, 72, 76, 165)
 
 # 动画 -> (行号, 源帧数, 播放 fps, 是否循环, 插帧方式)
 # 行号 0 基，已用像素差逐行校对过（见 --dump 与 alpha 覆盖率统计）：
@@ -43,6 +66,10 @@ MIN_SHIFT = 2.5
 #   row3 waving(4) row4 jumping(5) row5 failed(8)
 #   row6 running(6) row7 review(6) row8 thinking(2)
 #   row9/10 是 16 方向注视，不属于动画循环，不收
+#
+# reading 不是源表里的一行：它借用 idle 的 src_row=0，把呼吸帧复制两轮，
+# 再由 paint_reading_mouths() 逐帧补口型。这样「呼吸 + 说话」是同一套图，
+# 运行时只要换个 base 状态，不用叠图层、不用另起定时器、不调图像模型。
 #
 # thinking 只取 row8 的前两帧：第 1 帧垂手站着、第 2 帧手已经托在下巴上、
 # 另一条手臂横抱在肚子上（这就是「停下思考」要停住的那个姿势）。不循环，
@@ -75,6 +102,7 @@ ROW_MAP = {
     "review":        (7, 6, 10, False, "ai"),
     "thinking":      (8, 2, 4,  False, "ai"),
     "waiting":       (8, 6, 10, True,  "ai"),
+    "reading":       (0, 6, 8,  True,  "blend"),   # 虚拟行：idle 帧 + 口型
 }
 
 # AI 中间帧目录（make_pet_ai.py --build 的产物）。找不到就整体退回传统插值。
@@ -221,6 +249,39 @@ def neutralise_shadow(img, row: int, y_from: int = 185, dark_alpha: float = 0.42
     return n
 
 
+def paint_reading_mouths(img, row: int, n: int) -> int:
+    """把口型画到 reading 行：以原素材那条嘴线当上唇，往下补一块口腔。
+
+    不擦原嘴线——闭口帧直接拿它当闭着的嘴，张口帧的色块正好盖在它上面。
+    于是「闭→张→闭」是连续的，不会冒出两条线，也不用拿黄色去补脸
+    （那只蛙的脸是有渐变的，平涂一块必然是块补丁）。
+    """
+    from PyQt6.QtCore import QRectF, Qt
+    from PyQt6.QtGui import QColor, QPainter
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    mx, my = MOUTH_AT
+    drawn = 0
+    for c, (w, h) in enumerate(MOUTH_CYCLE[:n]):
+        if h <= 0:
+            continue
+        cx = c * FRAME_W + mx
+        cy = row * FRAME_H + my - h * 0.18
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(*MOUTH_DARK))
+        p.drawRoundedRect(QRectF(cx - w / 2, cy, w, h), h / 2, h / 2)
+        if h >= 4:
+            # 下唇一点亮色，口腔不至于是一块死黑
+            p.setBrush(QColor(*MOUTH_LIT))
+            p.drawRoundedRect(QRectF(cx - w * 0.34, cy + h * 0.55,
+                                     w * 0.68, h * 0.38),
+                              h * 0.19, h * 0.19)
+        drawn += 1
+    p.end()
+    return drawn
+
+
 def write_assets(img, sfx: dict[str, int], interp: bool = True) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -239,6 +300,11 @@ def write_assets(img, sfx: dict[str, int], interp: bool = True) -> None:
     print(f"中和 jumping 白色地面阴影 {fixed} 像素")
 
     img, anims, cols = interpolate_sheet(img, allow=interp)
+    if "reading" in anims:
+        rd = anims["reading"]
+        n = paint_reading_mouths(img, rd["row"], rd["frames"])
+        print(f"朗读口型        {n}/{rd['frames']} 帧带开口  "
+              f"（嘴线锚点 {MOUTH_AT}，配色取 jumping 口腔）")
     # 整表转 PNG：运行时只读 PNG，不依赖 Qt 的 webp 插件
     sheet = OUT / "sheet.png"
     if not img.save(str(sheet), "PNG"):
@@ -421,9 +487,17 @@ def interpolate_sheet(img, allow: bool = True):
                 print(f"  警告：{name} 缺 AI 中间帧，退回传统插值")
                 use = "blend"
         hi = interp_anim(frames, loop, ai) if use else frames
+        extra = {}
+        if name == "reading":
+            # 呼吸帧复制两轮：口型周期 1.5 秒，呼吸周期仍是 0.75 秒，
+            # 两者不绑死，循环接缝也还是干净的（12 帧整轮对齐）
+            hi = hi + hi
+            extra = {"mouth": True, "breath_cycles": 2}
         frames_by_anim[name] = hi
 
         dur = n / fps                       # 播放总时长，秒
+        if name == "reading":
+            dur *= 2
         anims[name] = {
             "row": out_row,
             "src_row": src_row,
@@ -432,11 +506,12 @@ def interpolate_sheet(img, allow: bool = True):
             "loop": loop,
             "src_frames": n,
             "interp": use or "none",
+            **extra,
         }
 
     cols = max(len(v) for v in frames_by_anim.values())
-    if cols > HI_COLS:
-        sys.exit(f"最多 {cols} 帧，超过 HI_COLS={HI_COLS}，调大常量")
+    if cols > MAX_COLS:
+        sys.exit(f"最多 {cols} 帧，超过 MAX_COLS={MAX_COLS}，调大常量")
 
     canvas = np.zeros((rows * FRAME_H, cols * FRAME_W, 4), np.uint8)
     for name, frames in frames_by_anim.items():

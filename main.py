@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 55
+BUILD_VERSION = 56
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2198,10 +2198,11 @@ class Reader(QWidget):
         if not self._pet:
             return
         if self.speech.running and not self.speech.paused:
-            # 朗读中常驻呼吸。原来常驻的是 row8 那套「抬手→放下→抱臂」循环，
-            # 20fps 一直在比划，读着书旁边有个东西不停动，看着很赶。
+            # 朗读中常驻「呼吸 + 口型」（reading），嘴跟着念、身子还是那套
+            # 安静的 idle 呼吸。原来常驻的是 row8 那套「抬手→放下→抱臂」
+            # 循环，20fps 一直在比划，读着书旁边有个东西不停动，看着很赶。
             # 小动作改成隔一阵子随机来一个（见 _pet_ambient）
-            name = pet.IDLE
+            name = pet.READING
         elif self.speech.paused or self._speech_paused:
             # 停了（手动按「停」或被老板键按下）：抬手托腮，播一次就停在
             # 那个姿势上等用户回来
@@ -2620,6 +2621,31 @@ def selftest() -> int:
             if not (anims and meta.get("frame_w")):
                 rc = 2
 
+            # reading 的口型是构建期画进精灵表的，不是运行时叠的图层。
+            # 直接比像素：张口帧必须和 idle 同列不同，闭口帧必须完全相同。
+            # 这样万一以后重跑 make_pet_sheet.py 漏了口型，自检会当场发现。
+            rd, idl = anims.get("reading") or {}, anims.get("idle") or {}
+            if rd.get("mouth") and idl:
+                fw = int(meta.get("frame_w", 0))
+                fh = int(meta.get("frame_h", 0))
+                ri, rr = int(idl.get("row", 0)), int(rd.get("row", -1))
+
+                def mouth_diff(col: int, src: int) -> int:
+                    n = 0
+                    for dy in range(30, 40):
+                        for dx in range(74, 94):
+                            if (img.pixel(col * fw + dx, rr * fh + dy)
+                                    != img.pixel(src * fw + dx, ri * fh + dy)):
+                                n += 1
+                    return n
+
+                opened, closed = mouth_diff(2, 2), mouth_diff(0, 0)
+                ok_mouth = opened >= 20 and closed == 0
+                log(f"pet mouth = reading 张口帧差 {opened} 像素 / "
+                    f"闭口帧差 {closed} 像素 {'OK' if ok_mouth else 'FAIL'}")
+                if not ok_mouth:
+                    rc = 2
+
             sfx = [assets.naiwa(f"sfx/{n}") for n in
                    ("laugh.mp3", "voice_01.mp3", "voice_02.mp3",
                     "voice_03.mp3", "voice_04.mp3")]
@@ -2870,8 +2896,9 @@ def petcheck() -> int:
             log("RESULT    = FAIL 精灵表读不出来")
             return 2
         log(f"frame     = {sp.size().width()}x{sp.size().height()}")
-        for name in (pet_mod.IDLE, pet_mod.RUNNING, pet_mod.THINKING,
-                     pet_mod.WAITING, pet_mod.WAVING, pet_mod.JUMPING,
+        for name in (pet_mod.IDLE, pet_mod.READING, pet_mod.RUNNING,
+                     pet_mod.THINKING, pet_mod.WAITING,
+                     pet_mod.WAVING, pet_mod.JUMPING,
                      pet_mod.FAILED, pet_mod.REVIEW, pet_mod.RUN_LEFT,
                      pet_mod.RUN_RIGHT):
             fr = sp.frames(name)
@@ -2879,6 +2906,23 @@ def petcheck() -> int:
                 f"{'loop' if sp.loops(name) else 'once'}")
             if not fr:
                 rc = 2
+
+        # 状态机接线：朗读常驻 reading、随机小动作播完能落回 reading、
+        # 停下朗读换成托腮（一次性、不循环）。常量改漏了这里会直接报错。
+        pst = pet_mod.PetState(sp)
+        pst.set_base(pet_mod.READING)
+        pst.tick(400)                       # 越过 MIN_DWELL_MS，让 pending 落地
+        at_read = pst.current == pet_mod.READING
+        pst.play(pet_mod.WAITING, 500)
+        pst.tick(600)                       # hold 到期，回到 base
+        back = pst.current == pet_mod.READING
+        pst.set_base(pet_mod.THINKING)
+        pst.tick(400)
+        at_pause = (pst.current == pet_mod.THINKING
+                    and not sp.loops(pet_mod.THINKING))
+        log(f"state     = 朗读 {at_read} / 小动作后回落 {back} / 停下托腮 {at_pause}")
+        if not (at_read and back and at_pause):
+            rc = 2
 
         # 真画一遍：气泡在上、蛙在下，导出 PNG 供肉眼回归。
         # 排版规则照抄 pet_window._metrics：窗口宽取两者较宽者，各自水平居中，
@@ -2903,7 +2947,8 @@ def petcheck() -> int:
         pet_mod.draw_bubble(p, bubble, font, st, text)
         frog = QRect((w - fsz.width()) // 2, h - fsz.height(),
                      fsz.width(), fsz.height())
-        pet_mod.draw_pet(p, frog, sp.frames(pet_mod.IDLE)[0])
+        # 用 reading 的张口帧，导出的回归图里能直接看见嘴有没有被打进包
+        pet_mod.draw_pet(p, frog, sp.frames(pet_mod.READING)[2])
         p.end()
         if not pm.save(str(png), "PNG"):
             log("render    = 保存失败")
