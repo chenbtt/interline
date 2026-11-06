@@ -6,6 +6,7 @@
  "anims": {
   "idle": {
    "row": 0,
+   "src_row": 0,
    "frames": 12,
    "fps": 16,
    "loop": true,
@@ -14,6 +15,7 @@
   },
   "running-right": {
    "row": 1,
+   "src_row": 1,
    "frames": 16,
    "fps": 32,
    "loop": true,
@@ -22,6 +24,7 @@
   },
   "running-left": {
    "row": 2,
+   "src_row": 2,
    "frames": 16,
    "fps": 32,
    "loop": true,
@@ -30,6 +33,7 @@
   },
   "waving": {
    "row": 3,
+   "src_row": 3,
    "frames": 4,
    "fps": 12,
    "loop": false,
@@ -38,6 +42,7 @@
   },
   "jumping": {
    "row": 4,
+   "src_row": 4,
    "frames": 5,
    "fps": 14,
    "loop": false,
@@ -46,6 +51,7 @@
   },
   "failed": {
    "row": 5,
+   "src_row": 5,
    "frames": 15,
    "fps": 17,
    "loop": false,
@@ -54,6 +60,7 @@
   },
   "running": {
    "row": 6,
+   "src_row": 6,
    "frames": 12,
    "fps": 30,
    "loop": true,
@@ -62,6 +69,7 @@
   },
   "review": {
    "row": 7,
+   "src_row": 7,
    "frames": 11,
    "fps": 18,
    "loop": false,
@@ -70,10 +78,20 @@
   },
   "thinking": {
    "row": 8,
+   "src_row": 8,
    "frames": 3,
    "fps": 6,
    "loop": false,
    "src_frames": 2,
+   "interp": "ai"
+  },
+  "waiting": {
+   "row": 9,
+   "src_row": 8,
+   "frames": 12,
+   "fps": 20,
+   "loop": true,
+   "src_frames": 6,
    "interp": "ai"
   }
  },

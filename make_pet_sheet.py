@@ -74,6 +74,7 @@ ROW_MAP = {
     "running":       (6, 6, 15, True,  "ai"),
     "review":        (7, 6, 10, False, "ai"),
     "thinking":      (8, 2, 4,  False, "ai"),
+    "waiting":       (8, 6, 10, True,  "ai"),
 }
 
 # AI 中间帧目录（make_pet_ai.py --build 的产物）。找不到就整体退回传统插值。
@@ -399,14 +400,17 @@ def interpolate_sheet(img, allow: bool = True):
     from PyQt6.QtGui import QImage
 
     src = img.convertToFormat(QImage.Format.Format_RGBA8888)
-    rows = max(v[0] for v in ROW_MAP.values()) + 1
+    # ROW_MAP 的第一个数是**源表行号**（多个动画可以复用同一行，比如
+    # thinking 和 waiting 都从 row8 切），输出行号按动画在表里的顺序另算。
+    # 以前两者恰好相等，混用没出事；现在会覆盖同一行，必须分开
+    rows = len(ROW_MAP)
 
     frames_by_anim: dict[str, list] = {}
     anims: dict[str, dict] = {}
-    for name, (row, n, fps, loop, mode) in ROW_MAP.items():
+    for out_row, (name, (src_row, n, fps, loop, mode)) in enumerate(ROW_MAP.items()):
         frames = []
         for c in range(n):
-            cell = src.copy(c * FRAME_W, row * FRAME_H, FRAME_W, FRAME_H)
+            cell = src.copy(c * FRAME_W, src_row * FRAME_H, FRAME_W, FRAME_H)
             frames.append(_to_np(cell))
 
         use = mode if allow else None
@@ -421,7 +425,8 @@ def interpolate_sheet(img, allow: bool = True):
 
         dur = n / fps                       # 播放总时长，秒
         anims[name] = {
-            "row": row,
+            "row": out_row,
+            "src_row": src_row,
             "frames": len(hi),
             "fps": max(1, round(len(hi) / dur)),
             "loop": loop,

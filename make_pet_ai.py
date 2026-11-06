@@ -51,6 +51,7 @@ UPSCALE = 512 / FRAME_W          # 喂给模型的输入宽度
 #   running-left 见 MIRROR：它是 running-right 的镜像，直接翻不用重新生成
 AI_ANIMS = {
     "thinking":      (8, 2, False),
+    "waiting":       (8, 6, True),
     "running":       (6, 6, True),
     "running-right": (1, 8, True),
     "review":        (7, 6, False),

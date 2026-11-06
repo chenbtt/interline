@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
 import threading
 import time
@@ -41,8 +42,11 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 54
+BUILD_VERSION = 55
 SERVER_KEY = "Interline.SingleInstance.v1"
+# 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
+# 8-15 秒大约是每两三句一个，不至于一直在动
+AMBIENT_GAP_MS = (8000, 15000)
 HEADER_H = 36
 RESIZE_MARGIN = 14
 # 单行模式下能拖动窗口的顶部窄条高度（其余区域留给点字和翻句）
@@ -383,6 +387,11 @@ class Reader(QWidget):
         self._pet_duck_timer = QTimer(self)
         self._pet_duck_timer.setSingleShot(True)
         self._pet_duck_timer.timeout.connect(self._pet_duck_end)
+        # 朗读中奶蛙常驻呼吸，隔一阵子随机来一个小动作（抬手/抬头/跑两步）。
+        # 常驻不放大动作：那套抬手放下循环 20fps 一直在动，看着很赶
+        self._pet_ambient_timer = QTimer(self)
+        self._pet_ambient_timer.setSingleShot(True)
+        self._pet_ambient_timer.timeout.connect(self._pet_ambient)
         self.hotkey = None
         try:
             self.hotkey = hotkey.GlobalHotkey(QApplication.instance(), self)
@@ -1730,6 +1739,9 @@ class Reader(QWidget):
         self._speech_pos = from_idx
         self._speech_char = from_char
         self.btn_speak.setText("停")
+        # 引擎报 speaking 要几百毫秒，这期间奶蛙还挂着上一个姿势。
+        # 自己推一次，顺手把「朗读中随机小动作」的定时器启动起来
+        self._pet_sync_base()
         # 不等 sayingWord：引擎报第一个词要几百毫秒，
         # 期间旧高亮还挂在上一句上。先把目标句点亮，点击即有反馈。
         # 一行模式下没有排版坐标，跳过——highlights 会用到 _tts_offsets。
@@ -2172,6 +2184,7 @@ class Reader(QWidget):
         if not self._pet:
             return
         self._pet = False
+        self._pet_ambient_timer.stop()
         if self._pet_window is not None:
             self._pet_window.stop()
         self._pet_duck_end()
@@ -2185,15 +2198,45 @@ class Reader(QWidget):
         if not self._pet:
             return
         if self.speech.running and not self.speech.paused:
-            name = pet.RUNNING
+            # 朗读中常驻呼吸。原来常驻的是 row8 那套「抬手→放下→抱臂」循环，
+            # 20fps 一直在比划，读着书旁边有个东西不停动，看着很赶。
+            # 小动作改成隔一阵子随机来一个（见 _pet_ambient）
+            name = pet.IDLE
         elif self.speech.paused or self._speech_paused:
             # 停了（手动按「停」或被老板键按下）：抬手托腮，播一次就停在
-            # 那个姿势上等用户回来，不再回到那个原地晃的循环
+            # 那个姿势上等用户回来
             name = pet.THINKING
         else:
             name = pet.IDLE
         if self._pet_window is not None:
             self._pet_window.set_base(name)
+        self._pet_ambient_sync()
+
+    # -------------------------------------------------- 朗读中的随机小动作
+
+    def _pet_ambient_sync(self):
+        """按朗读状态启停「随机小动作」的定时器。"""
+        reading = bool(self._pet and self.speech.running
+                       and not self.speech.paused)
+        if reading:
+            if not self._pet_ambient_timer.isActive():
+                self._pet_ambient_schedule()
+        else:
+            self._pet_ambient_timer.stop()
+
+    def _pet_ambient_schedule(self):
+        self._pet_ambient_timer.start(random.randint(AMBIENT_GAP_MS[0],
+                                                     AMBIENT_GAP_MS[1]))
+
+    def _pet_ambient(self):
+        """朗读中隔 8-15 秒随机来一个小动作，播完自己回到呼吸。
+
+        只挑没有音效的那几个：朗读时突然笑一声或者说话，是另一种打扰。
+        """
+        if not (self._pet and self.speech.running and not self.speech.paused):
+            return
+        self._pet_fx(random.choice(pet.AMBIENT_ACTS))
+        self._pet_ambient_schedule()
 
     def _pet_fx(self, name: str):
         if not self._pet or self._pet_window is None:
@@ -2828,8 +2871,9 @@ def petcheck() -> int:
             return 2
         log(f"frame     = {sp.size().width()}x{sp.size().height()}")
         for name in (pet_mod.IDLE, pet_mod.RUNNING, pet_mod.THINKING,
-                     pet_mod.WAVING, pet_mod.JUMPING, pet_mod.FAILED,
-                     pet_mod.REVIEW, pet_mod.RUN_LEFT, pet_mod.RUN_RIGHT):
+                     pet_mod.WAITING, pet_mod.WAVING, pet_mod.JUMPING,
+                     pet_mod.FAILED, pet_mod.REVIEW, pet_mod.RUN_LEFT,
+                     pet_mod.RUN_RIGHT):
             fr = sp.frames(name)
             log(f"  {name:<14} {len(fr):>2} 帧 {sp.fps(name):>2}fps "
                 f"{'loop' if sp.loops(name) else 'once'}")

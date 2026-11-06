@@ -20,6 +20,7 @@ import theme
 IDLE = "idle"
 RUNNING = "running"
 THINKING = "thinking"      # 停下朗读后的姿势：抬手托腮，播一次就停住（不循环）
+WAITING = "waiting"        # 抬手→放下→抱臂的原地小动作，只在朗读中偶尔播一次
 WAVING = "waving"
 JUMPING = "jumping"
 REVIEW = "review"
@@ -29,9 +30,13 @@ RUN_RIGHT = "running-right"
 
 BASE_STATES = (IDLE, RUNNING, THINKING)
 
+# 朗读进行中随机播的小动作：抬手放下、抬头看一眼、原地跑两步。
+# 都挑没有音效的——朗读时突然笑一声是另一种打扰
+AMBIENT_ACTS = (WAITING, REVIEW, RUNNING)
+
 # 瞬时动作的抢占权，大的能打断小的
 PRIORITY = {IDLE: 0, RUNNING: 0, THINKING: 0,
-            WAVING: 1, JUMPING: 1, REVIEW: 2, FAILED: 3,
+            WAITING: 1, WAVING: 1, JUMPING: 1, REVIEW: 2, FAILED: 3,
             RUN_LEFT: 5, RUN_RIGHT: 5}
 
 # base 之间切换的最小驻留，否则快速翻页会闪
