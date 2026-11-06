@@ -1,7 +1,7 @@
 {
  "frame_w": 192,
  "frame_h": 208,
- "cols": 12,
+ "cols": 16,
  "interp": true,
  "anims": {
   "idle": {
@@ -9,63 +9,72 @@
    "frames": 12,
    "fps": 16,
    "loop": true,
-   "src_frames": 6
+   "src_frames": 6,
+   "interp": "blend"
   },
   "running-right": {
    "row": 1,
-   "frames": 8,
-   "fps": 16,
+   "frames": 16,
+   "fps": 32,
    "loop": true,
-   "src_frames": 8
+   "src_frames": 8,
+   "interp": "ai"
   },
   "running-left": {
    "row": 2,
-   "frames": 8,
-   "fps": 16,
+   "frames": 16,
+   "fps": 32,
    "loop": true,
-   "src_frames": 8
+   "src_frames": 8,
+   "interp": "ai"
   },
   "waving": {
    "row": 3,
    "frames": 4,
    "fps": 12,
    "loop": false,
-   "src_frames": 4
+   "src_frames": 4,
+   "interp": "none"
   },
   "jumping": {
    "row": 4,
    "frames": 5,
    "fps": 14,
    "loop": false,
-   "src_frames": 5
+   "src_frames": 5,
+   "interp": "none"
   },
   "failed": {
    "row": 5,
-   "frames": 8,
-   "fps": 9,
+   "frames": 15,
+   "fps": 17,
    "loop": false,
-   "src_frames": 8
+   "src_frames": 8,
+   "interp": "ai"
   },
   "running": {
    "row": 6,
-   "frames": 6,
-   "fps": 15,
+   "frames": 12,
+   "fps": 30,
    "loop": true,
-   "src_frames": 6
+   "src_frames": 6,
+   "interp": "ai"
   },
   "review": {
    "row": 7,
-   "frames": 6,
-   "fps": 10,
+   "frames": 11,
+   "fps": 18,
    "loop": false,
-   "src_frames": 6
+   "src_frames": 6,
+   "interp": "ai"
   },
   "waiting": {
    "row": 8,
-   "frames": 6,
-   "fps": 10,
+   "frames": 12,
+   "fps": 20,
    "loop": true,
-   "src_frames": 6
+   "src_frames": 6,
+   "interp": "ai"
   }
  },
  "sfx": {

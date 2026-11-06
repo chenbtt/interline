@@ -55,7 +55,14 @@
 
 气泡宽度、奶蛙大小、音量都在设置里调。退出奶读模式会回到原来的窗口尺寸和位置，不会留下一个 350 像素的窗口。
 
-素材本身是低帧率的：每个动作只有 4–8 张关键帧，原速播放时单帧要停 70–125 ms，看着一顿一顿。`make_pet_sheet.py` 的处理分两种——`idle` 这个常驻状态做了帧间插值（6 → 12 帧、16 fps，循环总时长不变），跑动、跳、摇头这类动作则只提高播放帧率来缩短单帧停留。后者不插帧是因为它们的整体位移很小、肢体却在大幅摆动，任何 2D 混合都会把两条腿糊在一起；`idle` 的相邻帧位移不到 1 像素，插出来是干净的。
+素材本身是低帧率的：每个动作只有 4–8 张关键帧，原速播放时单帧要停 70–125 ms，看着一顿一顿。补帧分两种做法：
+
+- **图生图补中间帧**（`make_pet_ai.py`，用于 `waiting` / `running` / `running-right` / `running-left` / `review` / `failed`）。把相邻两帧喂给图像模型，让它画「正好在两者中间」的那一帧。实测相邻帧步长降 30–36%，是唯一能把「整体不动、肢体大摆」的动作补干净的办法。
+- **传统插值**（`make_pet_sheet.py` 里的质心补偿 + 交叉淡化，只用于 `idle`）。`idle` 相邻帧位移不到 1 像素，混合是干净的；换到跑动这类动作上会叠出两条腿。
+
+`waving` 和 `jumping` 不补帧，只把播放帧率提上来。前者模型把「抬手挥动」画成「手放在嘴边」还带出喙状变形（步长只降 18%），后者源素材带白色地面投影，喂进模型后投影在白底上消失，生成的中间帧跟前后帧对不上。
+
+图生图不是求中间值而是重画一帧，所以会顺带把不动的地方也重画（头部整段宽 5%、躯干 12%）。`make_pet_ai.py` 用逐行宽度归一化把轮廓压回两帧均值，头部误差从 4.5 px 降到 0.9 px；腿部区域不做这个校正，因为「两脚分开」和「两脚并拢」的跨度均值没有物理意义。中间帧的位置也不是完美的 50/50，实测落在 67% 附近，所以步长是「一大一小」交替，不是均匀减半。
 
 <p align="center">
   <img src="screenshots/pet-mode.png" width="420" alt="奶读模式">
@@ -160,6 +167,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
 | `logo.py` `make_icon.py` | 托盘/窗口图标绘制，生成 `icon.ico` |
 | `make_pet_sheet.py` | 下载奶蛙素材、切行校对、帧间插值，生成 `sheet.png` 与 `manifest.json` |
+| `make_pet_ai.py` | 构建期工具：图生图补中间帧（准备输入 / 扣底对齐 / 宽度归一化 / 镜像派生） |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑
@@ -171,6 +179,8 @@ python main.py --selftest      # 检查 Qt / 解析层 / 奶蛙素材 / TTS 引�
 python main.py --petcheck      # 奶蛙切帧与绘制冒烟，导出一张合成图
 python main.py --pdfcheck a.pdf # 只跑 PDF 解析，把结果打到临时文件
 ```
+
+改奶蛙素材时：`make_pet_ai.py` 要额外装 `opencv-python` 和 `pillow`（只在构建期用，不在 `requirements.txt` 里）。重生成中间帧要调几十次图像模型，产出的 192×208 成品帧放在 `assets/naiwa/mids/`，跟着仓库走；1024×1024 的原始产物在 `build/naiwa_ai/`，不进版本库。`make_pet_sheet.py` 找不到成品帧会自动退回传统插值，不会报错。
 
 调试时想避免污染真实配置，用环境变量把数据目录指到别处：
 
@@ -187,7 +197,7 @@ python -m PyInstaller Interline.spec --noconfirm
 
 产物是 `dist/Interline.exe`，约 65 MB。没开 UPX：单文件包本来就 deflate 过，UPX 只能再省一成左右，代价是每次启动多一层解压，还容易被杀软当成可疑程序。spec 里另外剔掉了 ffmpeg 解码后端和 `opengl32sw.dll`，合计 35 MB 上下，纯文字阅读用不到。
 
-奶蛙的 `sheet.png`（2 MB）和 5 个 mp3 由 `Interline.spec` 的 `datas` 逐条列出打进包，运行时用 `assets.resource_path()` 按 `sys._MEIPASS` 找回来。`datas` 不展开通配符，加素材要手动补一行；漏了不会崩，只会退化成空窗口，所以 `--selftest` 专门有一条查素材。
+奶蛙的 `sheet.png`（2.9 MB）和 5 个 mp3 由 `Interline.spec` 的 `datas` 逐条列出打进包，运行时用 `assets.resource_path()` 按 `sys._MEIPASS` 找回来。`datas` 不展开通配符，加素材要手动补一行；漏了不会崩，只会退化成空窗口，所以 `--selftest` 专门有一条查素材。`assets/naiwa/mids/` 是构建期输入，不进包。
 
 版本号只有一处：`main.py` 的 `BUILD_VERSION`，打包时由 spec 写进 exe 产品版本，运行时再从 exe 属性读回来。
 
@@ -203,7 +213,7 @@ python -m PyInstaller Interline.spec --noconfirm
 
 ## 致谢
 
-- 奶蛙精灵图：[timerring/codex-pet-naiwa](https://github.com/timerring/codex-pet-naiwa)（MIT）。`make_pet_sheet.py` 把它切成单帧入库，`jumping` 那一行自带的白色地面阴影改成了低透明度黑色，否则投在深色桌面上会发白光
+- 奶蛙精灵图：[timerring/codex-pet-naiwa](https://github.com/timerring/codex-pet-naiwa)（MIT）。`make_pet_sheet.py` 把它切成单帧入库，`jumping` 那一行自带的白色地面阴影改成了低透明度黑色，否则投在深色桌面上会发白光。`assets/naiwa/mids/` 里的中间帧由图像模型在该素材上生成，同样按 MIT 使用
 - 奶蛙音效：同项目附带的 `naiwa-pet` 语音包，仅供学习交流，**请勿商用**。要发布正式版请自行替换或去掉 `assets/naiwa/sfx/`
 - 在线音色：[edge-tts](https://github.com/rany2/edge-tts)（LGPL-3.0）
 

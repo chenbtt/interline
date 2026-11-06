@@ -36,7 +36,7 @@ HI_COLS = COLS * 2
 # 的动画硬平移反而会抖
 MIN_SHIFT = 2.5
 
-# 动画 -> (行号, 源帧数, 播放 fps, 是否循环, 是否插帧)
+# 动画 -> (行号, 源帧数, 播放 fps, 是否循环, 插帧方式)
 # 行号 0 基，已用像素差逐行校对过（见 --dump 与 alpha 覆盖率统计）：
 #   row0 idle（第 7 帧是首帧副本，去掉，用 6 帧）
 #   row1/row2 互为镜像，按眼睛朝向定为 right / left
@@ -45,21 +45,36 @@ MIN_SHIFT = 2.5
 #   row9/10 是 16 方向注视，不属于动画循环，不收
 #
 # 关于 fps：素材只有 4-8 帧，8fps 时单帧停留 125ms，看着一顿一顿。
-# 试过在两帧之间合成中间帧，只有 idle 干净（相邻帧位移 <1px）；
-# 跑动/摇头这类「整体不动、肢体在动」的动作，全局位移补偿和块匹配
-# 都会留下双影（实测见 tts-samples/_interp_all.png），所以其余动作
-# 不插帧，改为把播放帧率提上来缩短单帧停留，动作也跟着利落一点。
+#
+# 插帧方式三选一：
+#   "ai"    图生图模型补中间帧（见 make_pet_ai.py）。相邻帧步长实测降
+#           30-36%，是唯一能把「整体不动、肢体大摆」的动作补干净的办法。
+#   "blend" 传统插值（质心补偿 + 交叉淡化）。只对 idle 有效 —— 它相邻帧
+#           位移 <1px，混合不会叠出双影。
+#   None    不插帧，只把播放帧率提上来缩短单帧停留。
+#
+# 为什么 waving / jumping 不插：
+#   waving  模型把「抬手挥动」的中间态画成「手放在嘴边」，还带出喙状变形，
+#           步长只降 18%，实测不合格（tts-samples/_wave_board.png）
+#   jumping 该行源素材带白色地面投影，喂给模型后投影在白底上消失，
+#           生成的中间帧没有投影，跟前后帧对不上
 ROW_MAP = {
-    "idle":          (0, 6, 8,  True,  True),
-    "running-right": (1, 8, 16, True,  False),
-    "running-left":  (2, 8, 16, True,  False),
-    "waving":        (3, 4, 12, False, False),
-    "jumping":       (4, 5, 14, False, False),
-    "failed":        (5, 8, 9,  False, False),
-    "running":       (6, 6, 15, True,  False),
-    "review":        (7, 6, 10, False, False),
-    "waiting":       (8, 6, 10, True,  False),
+    "idle":          (0, 6, 8,  True,  "blend"),
+    "running-right": (1, 8, 16, True,  "ai"),
+    "running-left":  (2, 8, 16, True,  "ai"),
+    "waving":        (3, 4, 12, False, None),
+    "jumping":       (4, 5, 14, False, None),
+    "failed":        (5, 8, 9,  False, "ai"),
+    "running":       (6, 6, 15, True,  "ai"),
+    "review":        (7, 6, 10, False, "ai"),
+    "waiting":       (8, 6, 10, True,  "ai"),
 }
+
+# AI 中间帧目录（make_pet_ai.py --build 的产物）。找不到就整体退回传统插值。
+# 放在 assets/ 下而不是 build/：build/ 被 gitignore，而这些帧是图生图的产物，
+# 重跑一遍要几十次请求且结果不保证一致，值得跟着仓库走。
+# 体积只占 192x208 的成品图，不进 exe（Interline.spec 的 datas 是逐条列的）
+AI_DIR = HERE / "assets" / "naiwa" / "mids"
 
 # 音效：源文件名 -> 入库名。必须 ASCII 无空格（PyInstaller datas 与命令行都怕）
 SFX_MAP = {
@@ -216,12 +231,7 @@ def write_assets(img, sfx: dict[str, int], interp: bool = True) -> None:
     fixed = neutralise_shadow(img, ROW_MAP["jumping"][0])
     print(f"中和 jumping 白色地面阴影 {fixed} 像素")
 
-    if interp:
-        img, anims, cols = interpolate_sheet(img)
-    else:
-        anims = {k: {"row": v[0], "frames": v[1], "fps": v[2], "loop": v[3],
-                     "src_frames": v[1]} for k, v in ROW_MAP.items()}
-        cols = COLS
+    img, anims, cols = interpolate_sheet(img, allow=interp)
     # 整表转 PNG：运行时只读 PNG，不依赖 Qt 的 webp 插件
     sheet = OUT / "sheet.png"
     if not img.save(str(sheet), "PNG"):
@@ -231,13 +241,13 @@ def write_assets(img, sfx: dict[str, int], interp: bool = True) -> None:
 
     for k, v in anims.items():
         print(f"  {k:<14} {v['src_frames']:>2} -> {v['frames']:>2} 帧  "
-              f"{v['fps']:>2} fps  {'loop' if v['loop'] else 'once'}")
+              f"{v['fps']:>2} fps  {'loop' if v['loop'] else 'once':<4}  {v['interp']}")
 
     manifest = {
         "frame_w": FRAME_W,
         "frame_h": FRAME_H,
         "cols": cols,
-        # 哪些动作真的插了帧，看每个动作的 src_frames 与 frames 是否相等
+        # 每个动作实际用了哪种插帧方式，看 anims[*]["interp"]
         "interp": bool(interp),
         "anims": anims,
         # 音效时长：动画 hold 由它反推，避免两处各写一个数字
@@ -332,26 +342,52 @@ def blend_mid(a, b, t: float = 0.5, min_shift: float = MIN_SHIFT):
     return _unpremul(_premul(a) * (1 - t) + _premul(b) * t)
 
 
-def interp_anim(frames: list, loop: bool) -> list:
-    """每两帧中间插一帧。循环动画还要补「末帧 -> 首帧」的接缝，否则循环会顿一下。"""
+def _pair_list(n: int, loop: bool) -> list:
+    return ([(i, (i + 1) % n) for i in range(n)] if loop
+            else [(i, i + 1) for i in range(n - 1)])
+
+
+def load_ai_mids(name: str, n: int, loop: bool):
+    """读 make_pet_ai.py 产出的中间帧。缺一张就整体放弃，不做半套 ——
+    混着用会让某个循环里出现一个空帧位置。"""
+    import numpy as np
+    from PyQt6.QtGui import QImage
+
+    if not AI_DIR.exists():
+        return None
+    got = {}
+    for i, j in _pair_list(n, loop):
+        p = AI_DIR / name / f"{i}_{j}.png"
+        if not p.exists():
+            return None
+        img = QImage(str(p)).convertToFormat(QImage.Format.Format_RGBA8888)
+        if img.isNull() or (img.width(), img.height()) != (FRAME_W, FRAME_H):
+            return None
+        got[(i, j)] = _to_np(img)
+    return got
+
+
+def interp_anim(frames: list, loop: bool, ai_mids: dict | None = None) -> list:
+    """每两帧中间插一帧。循环动画还要补「末帧 -> 首帧」的接缝，否则循环会顿一下。
+
+    给了 ai_mids 就用图生图的结果，否则退回传统混合。"""
     n = len(frames)
     if n < 2:
         return list(frames)
     out: list = []
-    pairs = ([(i, (i + 1) % n) for i in range(n)] if loop
-             else [(i, i + 1) for i in range(n - 1)])
-    for i, j in pairs:
+    for i, j in _pair_list(n, loop):
         out.append(frames[i])
-        out.append(blend_mid(frames[i], frames[j]))
+        mid = ai_mids.get((i, j)) if ai_mids else None
+        out.append(mid if mid is not None else blend_mid(frames[i], frames[j]))
     if not loop:
         out.append(frames[-1])
     return out
 
 
-def interpolate_sheet(img):
-    """按 ROW_MAP 重排精灵表，需要插帧的动作帧数翻倍。
+def interpolate_sheet(img, allow: bool = True):
+    """按 ROW_MAP 重排精灵表，插帧的动作帧数翻倍。
 
-    列宽取所有动作里的最大帧数：只有 idle 插帧时是 12 列，全插时才是 16。
+    列宽取所有动作里的最大帧数：AI 插帧的 8 帧动作翻到 16 列。
     """
     import numpy as np
     from PyQt6.QtGui import QImage
@@ -361,12 +397,20 @@ def interpolate_sheet(img):
 
     frames_by_anim: dict[str, list] = {}
     anims: dict[str, dict] = {}
-    for name, (row, n, fps, loop, do_interp) in ROW_MAP.items():
+    for name, (row, n, fps, loop, mode) in ROW_MAP.items():
         frames = []
         for c in range(n):
             cell = src.copy(c * FRAME_W, row * FRAME_H, FRAME_W, FRAME_H)
             frames.append(_to_np(cell))
-        hi = interp_anim(frames, loop) if do_interp else frames
+
+        use = mode if allow else None
+        ai = None
+        if use == "ai":
+            ai = load_ai_mids(name, n, loop)
+            if ai is None:
+                print(f"  警告：{name} 缺 AI 中间帧，退回传统插值")
+                use = "blend"
+        hi = interp_anim(frames, loop, ai) if use else frames
         frames_by_anim[name] = hi
 
         dur = n / fps                       # 播放总时长，秒
@@ -376,6 +420,7 @@ def interpolate_sheet(img):
             "fps": max(1, round(len(hi) / dur)),
             "loop": loop,
             "src_frames": n,
+            "interp": use or "none",
         }
 
     cols = max(len(v) for v in frames_by_anim.values())
