@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
@@ -40,7 +41,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 50
+BUILD_VERSION = 51
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -2086,6 +2087,16 @@ class Reader(QWidget):
         if win is not None:
             win.set_text(self._pet_text)
 
+    # 设置页改蛙的大小 / 气泡宽度时走这两个入口。
+    # 没进奶读模式时窗口还不存在，直接空转——scale 会在 start() 时从配置读
+    def pet_apply_scale(self, scale: float):
+        if self._pet_window is not None:
+            self._pet_window.set_scale(scale)
+
+    def pet_relayout(self):
+        if self._pet_window is not None:
+            self._pet_window.relayout()
+
     # -------------------------------------------------- 进出
 
     def _pet_win(self) -> pet_window.PetWindow:
@@ -2869,6 +2880,39 @@ def pdfcheck(path: str) -> int:
     return rc
 
 
+def install_excepthook(get_win):
+    """槽里抛未捕获异常时别让进程 abort。
+
+    PyQt6 默认会把这类异常交给 qFatal()，表现就是「点一下滑块整个程序没了」，
+    连报错都看不到（打包版 console=False，stderr 是空的）。
+    装上自己的钩子后进程继续跑，堆栈落到 <数据目录>/error.log。
+    """
+    def hook(t, v, tb):
+        text = "".join(traceback.format_exception(t, v, tb))
+        try:
+            path = store.app_dir() / "error.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + text + "\n")
+        except Exception:
+            pass
+        # 打包版没有 stderr，往里写会再抛一次
+        try:
+            if sys.stderr is not None:
+                sys.stderr.write(text)
+                sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            w = get_win()
+            if w is not None:
+                w._set_hint("刚才那一步出错了，详情记在 error.log", 5000)
+        except Exception:
+            pass
+
+    sys.excepthook = hook
+
+
 def main():
     if "--selftest" in sys.argv:
         return selftest()
@@ -2893,6 +2937,8 @@ def main():
 
     st = store.Store()
     win = Reader(st)
+    # 槽里出错只记日志，不再整个程序消失
+    install_excepthook(lambda: win)
 
     # 托盘
     tray = QSystemTrayIcon(make_icon(), app)

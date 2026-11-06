@@ -476,19 +476,14 @@ class SettingsDialog(QDialog):
         self.pet_scale_label.setText(f"{value}%")
         self.st.set("pet.scale", value / 100.0)
         self.st.save_config()
-        r = self.reader
-        r._pet_sprite.set_scale(value / 100.0)
-        if r._pet:
-            r._pet_relayout()
-            r.update()
+        # 蛙在独立窗口里，改大小只通知它；没进奶读时窗口还没建，空转
+        self.reader.pet_apply_scale(value / 100.0)
 
     def _on_pet_bubble_w(self, value: int):
         self.pet_bw_label.setText(f"{value}px")
         self.st.set("pet.bubble_w", value)
         self.st.save_config()
-        if self.reader._pet:
-            self.reader._pet_relayout()
-            self.reader.update()
+        self.reader.pet_relayout()
 
     def _on_pet_sound(self, on: bool):
         self.st.set("pet.sound", bool(on))

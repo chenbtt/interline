@@ -146,6 +146,17 @@ class PetWindow(QWidget):
         self._place(first=False)
         self.update()
 
+    def set_scale(self, scale: float):
+        """改蛙的大小。气泡宽度不受影响，窗口按蛙脚锚点重新贴。"""
+        self.sprite.set_scale(scale)
+        self._place(first=False)
+        self.update()
+
+    def relayout(self):
+        """气泡宽度之类的排版参数变了：重算尺寸，锚点仍是蛙脚。"""
+        self._place(first=False)
+        self.update()
+
     def set_base(self, name: str):
         self.state.set_base(name)
         self.update()
