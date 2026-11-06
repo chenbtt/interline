@@ -49,6 +49,11 @@ FROG_H = 224          # 摆位后蛙的高度：与站立帧 208 接近，吸附
 PEEK_W = 187
 PEEK_MAX_H = 150
 
+# 顶边上下浮动的幅度（像素，加在可见高度上）。模型自己画的幅度是往上
+# 29px、往下 4px，挂在屏幕边上像在做引体向上。这里不靠重画，靠逐帧不同
+# 的裁剪量压到 ±6：蛙缩上去时被屏幕挡住的背本来就更多。
+PEEK_BOB = {"base": 0, "in": -6, "out": 6, "blink": 0}
+
 DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 
 # 吸附态的呼吸循环。播放顺序 base → in → base → out，眨眼帧 base→blink→base
@@ -223,6 +228,18 @@ def place(frog: Image.Image, cut: str, ratio: float, valign: str | None) -> Imag
     return canvas
 
 
+def _trim_top(im: Image.Image, target_h: int) -> Image.Image:
+    """从顶部裁掉多余的背，让可见高度正好等于 target_h。
+
+    裁掉的那段是「要被屏幕边缘挡住的背」，所以裁多裁少都不影响切口——
+    切口永远在画布上边。逐帧裁剪量不同，才造得出上下浮动。
+    """
+    trim = im.height - target_h
+    if trim <= 0:
+        return im
+    return im.crop((0, trim, im.width, im.height))
+
+
 def place_peek(frog: Image.Image) -> Image.Image:
     """顶边专用：蛙趴在边缘上往下探，身子在屏幕外。
 
@@ -288,14 +305,15 @@ def build() -> None:
     peek_src = _frames(SRC_PEEK) if SRC_PEEK.is_dir() else {}
     if "base" in peek_src:
         peek = _scale(peek_src, w=PEEK_W)
-        # 背画得太长，从顶上裁固定的一段：**每帧裁一样多**，头到切口的
-        # 距离才不会被抹平（那就是呼吸的可视部分）
-        trim = peek["base"].height - PEEK_MAX_H
-        if trim > 0:
-            peek = {p: im.crop((0, trim, im.width, im.height))
-                    for p, im in peek.items()}
+        # 背画得太长，从顶上裁一段。裁多少就是「屏幕边缘挡住了多少背」——
+        # 蛙往上缩的时候被挡住的本来就更多，所以逐帧的裁剪量不同是物理
+        # 正确的，不是后期拉扯。生成时模型给的浮动量没法精确控制（要 4%
+        # 它给 20%），这里把它压到 PEEK_BOB 像素。
+        peek = {p: _trim_top(im, PEEK_MAX_H + PEEK_BOB.get(p, 0))
+                for p, im in peek.items()}
         pb = peek["base"]
-        print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}")
+        print(f"顶边姿态 = {pb.width}x{pb.height}  相位 {'/'.join(sorted(peek))}"
+              f"  浮动 {PEEK_BOB['in']}~{PEEK_BOB['out']}px")
     else:
         print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
 
