@@ -28,8 +28,7 @@ import hotkey
 import library_view
 import logo
 import pet
-import pet_audio
-import pet_library
+import pet_window
 import settings_dialog
 import store
 import theme
@@ -41,16 +40,14 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 48
+BUILD_VERSION = 49
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
 # 单行模式下能拖动窗口的顶部窄条高度（其余区域留给点字和翻句）
 DRAG_ZONE = 8
 # 奶读模式：气泡尾巴尖到蛙头顶的间隙
-PET_GAP = 2
 # 奶读模式下判「这是拖拽不是点击」的位移阈值
-PET_DRAG_SLOP = 4
 
 
 # ------------------------------------------------------------------ 单实例
@@ -374,26 +371,13 @@ class Reader(QWidget):
         self._one_line_pos = (0, 0.0)
         self._one_line_idx = 0
 
-        # 奶读模式：整个窗口变成奶蛙，头顶挂一个聊天气泡
+        # 奶读模式：奶蛙是**独立悬浮窗**（像音乐软件的桌面歌词），
+        # 主窗照常看书。这里只保留「谁在念、念到第几句」这类业务状态。
         self._pet = False
-        self._pet_sprite = pet.PetSprite()
-        self._pet_state = pet.PetState(self._pet_sprite)
-        self._pet_audio: pet_audio.PetAudio | None = None
+        self._pet_window: pet_window.PetWindow | None = None
         self._pet_text = ""
         self._pet_idx = 0
-        self._pre_pet_geo = None
-        self._pet_drag = None
-        self._pet_last_ms = 0.0
-        self._pet_idle_ms = 0.0
         self._pet_ducked = False
-        # 书库面板是独立窗口，不参与奶蛙窗口的尺寸计算（见 pet_library 的模块注释）
-        self._pet_panel: pet_library.PetLibraryPanel | None = None
-        # 16ms 轮询（约 60Hz），真正的帧率由 PetState 按 manifest 里的 fps 决定。
-        # 原来 30ms 对 8-14fps 够用，但 idle 插帧后到 16fps、跑动到 16fps，
-        # 30ms 的量化误差会让个别帧多停一拍，反而看出抖
-        self._pet_timer = QTimer(self)
-        self._pet_timer.setInterval(16)
-        self._pet_timer.timeout.connect(self._pet_tick)
         # 笑声盖住朗读时把朗读压低，播完恢复；退出模式时也必须恢复
         self._pet_duck_timer = QTimer(self)
         self._pet_duck_timer.setSingleShot(True)
@@ -789,13 +773,8 @@ class Reader(QWidget):
         return False
 
     def _on_escape(self):
-        # Esc 退一层：书库面板 → 奶读 → 正常阅读 → 书库/目录 → 藏窗口
-        if self._pet_library_open():
-            self._pet_panel.close()
-            return
-        if self._pet:
-            self._exit_pet()
-            return
+        # Esc 退一层：正常阅读 → 书库/目录 → 藏窗口。
+        # 奶读不在这一链上：蛙是独立窗口，Esc 落在它身上就收它自己。
         if self.mode != "read":
             self.set_mode("read")
         else:
@@ -985,8 +964,8 @@ class Reader(QWidget):
             self.font_panel.setWindowOpacity(opacity)
             self.font_panel._apply_style()
         # 奶读书库面板同理
-        if self._pet_panel is not None:
-            self._pet_panel.apply_theme()
+        if self._pet_window is not None:
+            self._pet_window.apply_theme()
         if getattr(self, "search_input", None) is not None:
             self._style_search_bar()
         # 浅色皮肤要把所有「白叠加」翻成黑叠加，否则这些控件在浅底上会消失
@@ -1059,10 +1038,6 @@ class Reader(QWidget):
             pass
 
     def _paint(self):
-        # 奶读模式整窗只有蛙和气泡，没有圆角底板也没有状态条
-        if self._pet:
-            self._paint_pet()
-            return
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1100,9 +1075,6 @@ class Reader(QWidget):
                 and pos.y() >= self.height() - RESIZE_MARGIN)
 
     def mousePressEvent(self, ev):
-        if self._pet:
-            self._pet_press(ev)
-            return
         if ev.button() != Qt.MouseButton.LeftButton:
             return
         pos = ev.position().toPoint()
@@ -1115,9 +1087,6 @@ class Reader(QWidget):
         ev.accept()
 
     def mouseMoveEvent(self, ev):
-        if self._pet:
-            self._pet_move(ev)
-            return
         pos = ev.position().toPoint()
         if self._edge_hit(pos):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
@@ -1133,9 +1102,6 @@ class Reader(QWidget):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
-        if self._pet:
-            self._pet_release(ev)
-            return
         moved = self._resizing or self._drag_origin is not None
         self._resizing = False
         self._drag_origin = None
@@ -1146,14 +1112,7 @@ class Reader(QWidget):
         ev.accept()
 
     def wheelEvent(self, ev):
-        # 正文的滚轮走 eventFilter；奶读模式下正文藏起来了，这里接管
-        if not self._pet:
-            super().wheelEvent(ev)
-            return
-        dy = ev.angleDelta().y()
-        if dy:
-            self._pet_step(1 if dy < 0 else -1)
-        ev.accept()
+        super().wheelEvent(ev)
 
     def _persist(self):
         """存进度 + 存几何。
@@ -1167,16 +1126,10 @@ class Reader(QWidget):
     def _hide_window(self):
         if self.font_panel is not None:
             self.font_panel.hide()
-        if self._pet:
-            # 藏起来就别再烧 CPU，音效也立刻掐掉
-            self._pet_timer.stop()
+        if self._pet and self._pet_window is not None:
+            # 悬浮窗不跟着藏就会孤零零留在桌面上，声音也停不下来
+            self._pet_window.suspend()
             self._pet_duck_end()
-            if self._pet_audio is not None:
-                self._pet_audio.stop()
-            # 面板是独立窗口，不跟着藏就会孤零零飘在桌面上
-            self._pet_panel_restore = self._pet_library_open()
-            if self._pet_panel is not None:
-                self._pet_panel.hide()
         self._persist()
         self.hide()
 
@@ -1200,9 +1153,10 @@ class Reader(QWidget):
 
     def closeEvent(self, ev):
         self._persist()
-        # 面板没有父窗口，不显式关掉会留下一个无主的空窗
-        if self._pet_panel is not None:
-            self._pet_panel.close()
+        # 悬浮窗没有父窗口，不显式关掉会留下一个无主的空窗
+        if self._pet_window is not None:
+            self._pet_window.stop()
+            self._pet_window.close()
         if self.hotkey is not None:
             self.hotkey.unregister()
         ev.accept()
@@ -1843,10 +1797,8 @@ class Reader(QWidget):
         self.btn_speak.setText("听")
         self._clear_highlight()
         # 读完一章：奶蛙抬头等你翻页
-        if self._pet:
-            self._pet_state.set_base(pet.IDLE)
-            self._pet_state.play(pet.REVIEW, 3000)
-            self.update()
+        if self._pet and self._pet_window is not None:
+            self._pet_window.review()
 
     def _speech_menu(self, pos):
         if not self.book:
@@ -2113,63 +2065,6 @@ class Reader(QWidget):
         f.setPixelSize(max(13, min(17, round(size * 0.62))))
         return f
 
-    def _pet_metrics(self):
-        """算 (窗口尺寸, 气泡主体矩形, 蛙矩形)。
-
-        蛙水平居中、贴底；气泡在最上面，尾巴尖离蛙头 PET_GAP。
-        窗口底边中心 = 蛙底中心，这就是显隐气泡时的锚点。
-        """
-        frog = self._pet_sprite.size()
-        # 没书 / 没句子时别留一个空气泡：只剩蛙，跟手动隐藏气泡一个样子
-        if not bool(self.st.get("pet.show_bubble", True)) or not self._pet_text:
-            return (QSize(frog.width(), frog.height()), None,
-                    QRect(0, 0, frog.width(), frog.height()))
-
-        max_w = int(self.st.get("pet.bubble_w", 360))
-        body = pet.measure_bubble(self._pet_font(), self._pet_text, max_w)
-        w = max(frog.width(), body.width())
-        h = body.height() + pet.BUBBLE_TAIL + PET_GAP + frog.height()
-        bubble = QRect((w - body.width()) // 2, 0, body.width(), body.height())
-        frog_r = QRect((w - frog.width()) // 2, h - frog.height(),
-                       frog.width(), frog.height())
-        return QSize(w, h), bubble, frog_r
-
-    def _pet_relayout(self, first: bool = False):
-        size, _bubble, _frog = self._pet_metrics()
-        if first:
-            x = self.st.get("pet.x")
-            y = self.st.get("pet.y")
-            if (isinstance(x, int) and isinstance(y, int)
-                    and any(s.availableGeometry().contains(x + 30, y + 30)
-                            for s in QApplication.screens())):
-                self.setFixedSize(size)
-                self.move(x, y)
-                return
-            scr = QApplication.primaryScreen().availableGeometry()
-            self.setFixedSize(size)
-            self.move(scr.right() - size.width() - 40,
-                      scr.bottom() - size.height() - 48)
-            return
-
-        # 锚点：蛙脚不能因为气泡变高一格就跳一下
-        g = self.geometry()
-        cx = g.x() + g.width() // 2
-        by = g.y() + g.height()
-        self.setFixedSize(size)
-        self.move(cx - size.width() // 2, by - size.height())
-        if self._pet_panel is not None:
-            self._pet_panel.follow(self.geometry())
-
-    def _pet_audio_obj(self) -> pet_audio.PetAudio | None:
-        if self._pet_audio is None:
-            try:
-                a = pet_audio.PetAudio(self.st, self)
-                a.notice.connect(lambda s: None if self._pet else self._set_hint(s, 4000))
-                self._pet_audio = a
-            except Exception:
-                self._pet_audio = None
-        return self._pet_audio
-
     def _pet_current_text(self) -> str:
         if not self.book:
             return "打开一本书吧"
@@ -2182,190 +2077,109 @@ class Reader(QWidget):
         if not self._pet:
             return
         self._pet_text = self._pet_current_text()
-        size, _bubble, _frog = self._pet_metrics()
-        if size != self.size():
-            self._pet_relayout()
-        self.update()
+        win = self._pet_window
+        if win is not None:
+            win.set_text(self._pet_text)
 
     # -------------------------------------------------- 进出
+
+    def _pet_win(self) -> pet_window.PetWindow:
+        """惰性建窗：不用奶读模式的人不该为它付启动开销。"""
+        if self._pet_window is None:
+            w = pet_window.PetWindow(self.st, self._pet_font, self._pet_speech_label)
+            w.toggle_speech.connect(self._toggle_speech)
+            w.bubble_clicked.connect(self._pet_bubble_clicked)
+            w.step.connect(self._pet_step)
+            w.request_open.connect(self.pick_file)
+            w.request_library.connect(self._pet_open_library)
+            w.request_settings.connect(self._open_settings)
+            w.exit_pet.connect(self._exit_pet)
+            w.quit_app.connect(QApplication.instance().quit)
+            w.sound_started.connect(self._pet_duck_start)
+            w.notice.connect(lambda s: self._set_hint(s, 4000))
+            self._pet_window = w
+        return self._pet_window
+
+    def _pet_speech_label(self) -> tuple[str, bool]:
+        """右键菜单里那一条朗读项：文案 + 能不能点。"""
+        if self.speech.running and not self.speech.paused:
+            return "停止朗读", True
+        if self.speech.paused:
+            return "继续朗读", True
+        return "开始朗读", bool(self.book and self._tts_sentences)
+
+    def _pet_bubble_clicked(self):
+        """点气泡：没书就去挑书，有书就播/停。"""
+        if not self.book:
+            self.pick_file()
+        else:
+            self._toggle_speech()
+
+    def _pet_open_library(self):
+        """悬浮窗菜单点「书库」：把主窗叫到前面并切到书库。
+
+        蛙不退出——它只是浮在旁边，和主窗里的书库互不干扰。
+        """
+        self._do_show()
+        self.set_mode("books")
 
     def _enter_pet(self):
         if self._pet:
             return
         if self._one_line:
             self._exit_one_line()
-        if not self._pet_sprite.load():
-            self._set_hint("奶蛙素材缺失，奶读模式用不了", 4000)
-            return
 
-        self._pet_sprite.set_scale(float(self.st.get("pet.scale", 0.9)))
-        self._pre_pet_geo = self.geometry()
         self._pet = True
         self._pet_idx = self._current_sentence_index() if self.book else 0
         self._pet_text = self._pet_current_text()
-
-        self.header.hide()
-        self.footer.hide()
-        self.search_bar.hide()
-        if self.font_panel is not None:
-            self.font_panel.hide()
-        self.stack.hide()
-        # 固定尺寸前先解锁上下限，否则 setFixedSize 会被旧的 320×120 卡住
-        self.setMinimumSize(1, 1)
-        self.setMaximumSize(16777215, 16777215)
-        self._pet_relayout(first=True)
-
-        self._pet_state.reset()
+        if not self._pet_win().start(self._pet_text):
+            self._pet = False
+            self._set_hint("奶蛙素材缺失，奶读模式用不了", 4000)
+            return
         self._pet_sync_base()
-        self._pet_last_ms = time.monotonic() * 1000.0
-        self._pet_idle_ms = 0.0
-        self._pet_timer.start()
-        self._pet_fx(pet.WAVING)
 
         self.st.set("pet.on", True)
         self.st.save_config()
-        self.update()
 
     def _exit_pet(self):
         if not self._pet:
             return
-        # 先存奶蛙的位置：_pet 一置 False，_save_geometry 就会去存 window.*，
-        # 把 352x264 这种宠物尺寸写进正常窗口配置里
-        g = self.geometry()
-        self.st.set("pet.x", g.x())
-        self.st.set("pet.y", g.y())
         self._pet = False
-        # 面板是独立窗口，退出奶读模式后必须一起关掉，否则它会自己飘在桌面上
-        if self._pet_panel is not None:
-            self._pet_panel.close()
-        self._pet_timer.stop()
+        if self._pet_window is not None:
+            self._pet_window.stop()
         self._pet_duck_end()
-        if self._pet_audio is not None:
-            self._pet_audio.stop()
-        self._pet_state.reset()
-        self._pet_drag = None
-        self.st.save_config()
-
-        self.setMinimumSize(320, 120)
-        self.setMaximumSize(16777215, 16777215)
-        self.header.show()
-        self.footer.show()
-        self.stack.show()
-        if self._pre_pet_geo is not None:
-            self.setGeometry(self._pre_pet_geo)
-            self._pre_pet_geo = None
-        self._refresh_actions()
-        self._apply_theme()
-        self._update_status()
-
         self.st.set("pet.on", False)
         self.st.save_config()
-        # 文档一直没动，不需要像一行模式那样重新定位章节
-        self.update()
-
-    # -------------------------------------------------- 绘制
-
-    def _paint_pet(self):
-        try:
-            p = QPainter(self)
-            try:
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-                # 用 Source 清成真透明：SourceOver 铺全透明等于没铺，
-                # 上一帧的蛙会留在原地
-                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-                p.fillRect(self.rect(), Qt.GlobalColor.transparent)
-                p.setCompositionMode(
-                    QPainter.CompositionMode.CompositionMode_SourceOver)
-
-                _size, bubble, frog = self._pet_metrics()
-                if bubble is not None and self._pet_text:
-                    pet.draw_bubble(p, bubble, self._pet_font(), self.st, self._pet_text)
-                frames = self._pet_sprite.frames(self._pet_state.current)
-                if frames:
-                    pet.draw_pet(p, frog,
-                                 frames[min(self._pet_state.frame, len(frames) - 1)])
-            finally:
-                p.end()
-        except Exception:
-            pass
-
-    def _pet_tick(self):
-        if not self._pet:
-            return
-        now = time.monotonic() * 1000.0
-        dt = now - self._pet_last_ms if self._pet_last_ms else 30.0
-        self._pet_last_ms = now
-        dt = max(0.0, min(dt, 200.0))       # 休眠回来别一次跳几百帧
-
-        before = (self._pet_state.current, self._pet_state.frame)
-        self._pet_state.tick(dt)
-        if before != (self._pet_state.current, self._pet_state.frame):
-            self.update()
-
-        # 闲置久了嘀咕一句（默认关，怕吵）
-        if self._pet_state.current == pet.IDLE and not self._pet_state.busy:
-            self._pet_idle_ms = getattr(self, "_pet_idle_ms", 0.0) + dt
-            if (self._pet_idle_ms > 120000
-                    and bool(self.st.get("pet.idle_voice", False))):
-                self._pet_idle_ms = 0.0
-                self._pet_fx(pet.IDLE)
-        else:
-            self._pet_idle_ms = 0.0
 
     # -------------------------------------------------- 状态与音效
 
     def _pet_sync_base(self):
+        """朗读状态 → 悬浮窗的持续动作。"""
         if not self._pet:
             return
         if self.speech.running and not self.speech.paused:
-            self._pet_state.set_base(pet.RUNNING)
+            name = pet.RUNNING
         elif self.speech.paused:
-            self._pet_state.set_base(pet.WAITING)
+            name = pet.WAITING
         else:
-            self._pet_state.set_base(pet.IDLE)
-        self.update()
+            name = pet.IDLE
+        if self._pet_window is not None:
+            self._pet_window.set_base(name)
 
     def _pet_fx(self, name: str):
-        """瞬时动作 + 音效的唯一出口：动画时长由音频时长反推。
-
-        两处各写一个时长数字，迟早会错位成「动画 1.2s、声音 3.5s」。
-        """
-        if not self._pet:
+        if not self._pet or self._pet_window is None:
             return
-
-        clip, cooldown = "", 0
-        if name == pet.JUMPING:
-            clip, cooldown = pet_audio.LAUGH, 2000     # 2s 内连点不重响
-        elif name == pet.WAVING or name == pet.IDLE:
-            clip = pet_audio.PetAudio.random_voice()
-
-        hold = 0.0
-        if clip:
-            audio = self._pet_audio_obj()
-            if audio is not None and audio.play(clip, cooldown_ms=cooldown):
-                hold = float(audio.duration(clip))
-                self._pet_duck_start(int(hold))
-        if hold <= 0:
-            # 没出声就按「一帧时长 × 帧数 × 3 个来回」估，别让动作一闪而过
-            n = len(self._pet_sprite.frames(name)) or 4
-            hold = 1000.0 / max(1, self._pet_sprite.fps(name)) * n * 3
-
-        self._pet_state.play(name, hold)
-        self.update()
+        self._pet_window.fx(name)
 
     def preview_pet_sound(self):
         """设置页的「试听笑声」：不进奶读模式也能听一耳朵。"""
-        audio = self._pet_audio_obj()
-        if audio is not None:
-            audio.play(pet_audio.LAUGH)
+        self._pet_win().preview_sound()
 
     def _pet_play_direction(self, name: str, hold: int = 620):
         """翻句时原地跑两步，表示「往那个方向去了」。"""
-        if not self._pet:
+        if not self._pet or self._pet_window is None:
             return
-        self._pet_state.play(name, hold)
-        self.update()
+        self._pet_window.play_direction(name, hold)
 
     def _pet_duck_start(self, ms: int):
         if not self.st.get("pet.duck", True) or self._pet_ducked:
@@ -2411,7 +2225,7 @@ class Reader(QWidget):
         if self.speech.running:
             self._start_speech(self._pet_idx)
         elif 0 <= self._pet_idx < len(self._tts_offsets):
-            # 隐藏的正文也要跟着滚，否则退出奶读模式会跳回原处
+            # 主窗正文跟着滚到同一句，蛙念到哪读者就看到哪
             self._scroll_to_char(self._tts_base + self._tts_offsets[self._pet_idx])
         self._pet_refresh()
 
@@ -2419,179 +2233,6 @@ class Reader(QWidget):
         if 0 <= idx < len(self._tts_sentences):
             self._pet_idx = idx
             self._pet_refresh()
-
-    # -------------------------------------------------- 鼠标
-
-    def _pet_hit(self, pos: QPoint) -> str:
-        _size, bubble, frog = self._pet_metrics()
-        if bubble is not None:
-            body = QRect(bubble.x(), bubble.y(), bubble.width(),
-                         bubble.height() + pet.BUBBLE_TAIL)
-            if body.contains(pos):
-                return "bubble"
-        if frog.contains(pos):
-            return "frog"
-        return ""
-
-    def _pet_press(self, ev):
-        if ev.button() == Qt.MouseButton.RightButton:
-            self._pet_menu(ev.globalPosition().toPoint())
-            ev.accept()
-            return
-        if ev.button() != Qt.MouseButton.LeftButton:
-            return
-        gp = ev.globalPosition().toPoint()
-        self._pet_drag = {"start": gp, "win": self.pos(),
-                          "last_x": gp.x(), "moved": False}
-        self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        ev.accept()
-
-    def _pet_move(self, ev):
-        gp = ev.globalPosition().toPoint()
-        d = self._pet_drag
-        if d is None:
-            hit = self._pet_hit(ev.position().toPoint())
-            self.setCursor(Qt.CursorShape.PointingHandCursor if hit == "bubble"
-                           else Qt.CursorShape.OpenHandCursor if hit == "frog"
-                           else Qt.CursorShape.ArrowCursor)
-            return
-        if not d["moved"] and (gp - d["start"]).manhattanLength() > PET_DRAG_SLOP:
-            d["moved"] = True
-        if d["moved"]:
-            self.move(d["win"] + (gp - d["start"]))
-            if self._pet_panel is not None:
-                self._pet_panel.follow(self.geometry())
-            dx = gp.x() - d["last_x"]
-            if dx:
-                # 拖拽独占：期间忽略一切状态触发，否则会和 running 互相踩
-                self._pet_state.lock(pet.RUN_LEFT if dx < 0 else pet.RUN_RIGHT)
-                self.update()
-        d["last_x"] = gp.x()
-        ev.accept()
-
-    def _pet_release(self, ev):
-        d = self._pet_drag
-        self._pet_drag = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        if d is not None and d["moved"]:
-            self._pet_state.unlock()
-            self._save_geometry()
-            self.update()
-            ev.accept()
-            return
-
-        hit = self._pet_hit(ev.position().toPoint())
-        if hit == "frog":
-            self._pet_fx(pet.JUMPING)          # 摸它一下
-        elif hit == "bubble":
-            if not self.book:
-                self._exit_pet()
-                self._do_show()
-                self.pick_file()
-            else:
-                self._toggle_speech()
-        ev.accept()
-
-    def _pet_leave(self, fn):
-        """菜单里那些「要回到正常界面」的动作，先退出奶读模式再执行。"""
-        def run():
-            self._exit_pet()
-            self._do_show()
-            fn()
-        return run
-
-    def _pet_toggle_bubble(self):
-        show = not bool(self.st.get("pet.show_bubble", True))
-        self.st.set("pet.show_bubble", show)
-        self.st.save_config()
-        self._pet_relayout()
-        self.update()
-
-    # -------------------------------------------------- 书库面板
-
-    def _pet_library_open(self) -> bool:
-        return self._pet_panel is not None and self._pet_panel.isVisible()
-
-    def _pet_toggle_library(self):
-        if self._pet_library_open():
-            self._pet_panel.close()
-        else:
-            self._pet_show_library()
-
-    def _pet_show_library(self):
-        """在奶蛙旁边弹出书库。不退出奶读模式，蛙也不动。"""
-        if not self._pet:
-            return
-        if self._pet_panel is None:
-            p = pet_library.PetLibraryPanel(self.st)
-            p.open_book.connect(self._pet_open_from_library)
-            p.view().add_requested.connect(self._pet_add_file)
-            p.closed.connect(self._pet_library_closed)
-            self._pet_panel = p
-        p = self._pet_panel
-        p.sync_flags(bool(self.st.get("always_on_top", True)))
-        p.apply_theme()
-        p.show_books()
-        p.place_beside(self.geometry())
-        p.show()
-        p.raise_()
-        p.activateWindow()
-        # 焦点给面板：方向键/回车/Del 要直接作用在书列表上
-        p.view().setFocus()
-
-    def _pet_library_closed(self):
-        # 焦点必须还回奶蛙，否则滚轮翻句、Esc 都落空
-        if self._pet:
-            self.activateWindow()
-            self.setFocus()
-
-    def _pet_open_from_library(self, path: str):
-        """面板里选了一本书：留在奶读模式，换掉蛙正在念的那本。"""
-        if self._pet_panel is not None:
-            self._pet_panel.close()
-        self.open_path(path)
-        if self._pet:
-            self._pet_idx = 0
-            self._pet_refresh()
-
-    def _pet_add_file(self):
-        """面板右键「添加书籍…」：选完直接给蛙念，不用退出奶读模式。"""
-        if self._pet_panel is not None:
-            self._pet_panel.close()
-        self.pick_file()
-        if self._pet:
-            self._pet_idx = 0
-            self._pet_refresh()
-
-    def _pet_menu(self, global_pos):
-        menu = QMenu(self)
-        show = bool(self.st.get("pet.show_bubble", True))
-        menu.addAction("隐藏气泡" if show else "显示气泡").triggered.connect(
-            self._pet_toggle_bubble)
-
-        if self.speech.running and not self.speech.paused:
-            speak = "停止朗读"
-        elif self.speech.paused:
-            speak = "继续朗读"
-        else:
-            speak = "开始朗读"
-        act_speak = menu.addAction(speak)
-        act_speak.setEnabled(bool(self.book and self._tts_sentences))
-        act_speak.triggered.connect(self._toggle_speech)
-
-        menu.addSeparator()
-        menu.addAction("打开文件…").triggered.connect(
-            self._pet_leave(self.pick_file))
-        # 书库留在奶读模式里开：蛙不消失，面板浮在它旁边
-        menu.addAction("收起书库" if self._pet_library_open() else "书库…").triggered.connect(
-            self._pet_toggle_library)
-        menu.addAction("设置…").triggered.connect(
-            self._pet_leave(self._open_settings))
-        menu.addSeparator()
-        menu.addAction("退出奶读模式").triggered.connect(self._exit_pet)
-        menu.addAction("退出程序").triggered.connect(
-            QApplication.instance().quit)
-        menu.exec(global_pos)
 
     # -------------------------------------------------- 书签
 
@@ -2809,10 +2450,9 @@ class Reader(QWidget):
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
-        # 面板是独立窗口，置顶开关不会自动跟过去
-        if self._pet_panel is not None:
-            self._pet_panel.sync_flags(on)
-            self._pet_panel.follow(self.geometry())
+        # 悬浮窗是独立窗口，置顶开关不会自动跟过去
+        if self._pet_window is not None:
+            self._pet_window.sync_on_top(on)
 
     # -------------------------------------------------- 显示
 
@@ -2820,16 +2460,10 @@ class Reader(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
-        if self._pet:
-            self._pet_last_ms = time.monotonic() * 1000.0
-            if not self._pet_timer.isActive():
-                self._pet_timer.start()
-            # 老板键/托盘藏起来之前开着书库的话，回来时接着开
-            if getattr(self, "_pet_panel_restore", False):
-                self._pet_panel_restore = False
-                self._pet_show_library()
+        if self._pet and self._pet_window is not None:
+            self._pet_window.resume()
             # 刚从托盘/热键/二次启动唤起来，让奶蛙打个招呼
-            self._pet_fx(pet.WAVING)
+            self._pet_window.fx(pet.WAVING)
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
@@ -2920,6 +2554,16 @@ def selftest() -> int:
             missing = [p.name for p in sfx if not p.exists()]
             log(f"pet sfx   = {'OK 5/5' if not missing else 'MISSING ' + str(missing)}")
             if missing:
+                rc = 2
+
+            # 悬浮窗是奶读模式的主力，模块没打进来要在这里就暴露。
+            # 只查类和方法是否存在，不构造 QWidget（见下面 TTS 与 QPixmap 的坑）
+            import pet_window
+            need = ("start", "stop", "set_text", "fx", "suspend", "resume")
+            lacking = [n for n in need
+                       if not hasattr(pet_window.PetWindow, n)]
+            log(f"pet window= {'OK' if not lacking else 'MISSING ' + str(lacking)}")
+            if lacking:
                 rc = 2
         except Exception as e:
             log(f"pet FAIL  = {type(e).__name__}: {e}")
@@ -3146,7 +2790,7 @@ def petcheck() -> int:
                 rc = 2
 
         # 真画一遍：气泡在上、蛙在下，导出 PNG 供肉眼回归。
-        # 排版规则照抄 _pet_metrics：窗口宽取两者较宽者，各自水平居中，
+        # 排版规则照抄 pet_window._metrics：窗口宽取两者较宽者，各自水平居中，
         # 否则气泡尾巴会指不到蛙头，导出的图跟真实样子对不上。
         size = int(st.get("font.size", store_mod.DEFAULT_CONFIG["font"]["size"]))
         font = QFont(st.get("font.family", store_mod.UI_FONT))
@@ -3155,7 +2799,8 @@ def petcheck() -> int:
         body = pet_mod.measure_bubble(font, text, 360)
         fsz = sp.size()
         w = max(body.width(), fsz.width())
-        h = (body.height() + pet_mod.BUBBLE_TAIL + PET_GAP + fsz.height())
+        h = (body.height() + pet_mod.BUBBLE_TAIL + pet_window.BUBBLE_PAD
+             + fsz.height())
         margin = 24
         pm = QPixmap(w + margin * 2, h + margin * 2)
         pm.fill(QColor("#161a1f"))
