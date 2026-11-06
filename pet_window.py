@@ -34,6 +34,7 @@ BUBBLE_PAD = 2         # 气泡尾巴尖到蛙头的空隙（尾巴本身另算�
 SCREEN_INSET = 40      # 首次出现时离屏幕右下角的距离
 GREET_DELAY_MS = 200   # 出现后隔多久打招呼（让首帧和音频链路先就位）
 SNAP_ANIM_MS = 150     # 吸附时滑过去的时间
+TAIL_HEAD = 0.18       # 吸附态气泡尾巴的落点：可见盒从上往下 18% 处（嘴的位置）
 
 
 class PetWindow(QWidget):
@@ -190,16 +191,100 @@ class PetWindow(QWidget):
         吸附态取素材的基准可见盒，站立态取气泡排版算出来的蛙矩形。
         切换形态时靠它当锚——尺寸和姿态都变了，但蛙不该跳。
         """
-        g = self.geometry()
         if self._edge_dir:
             geo = self.edge.geo(self._edge_dir) or {}
             box = geo.get("base") or [0, 0, self.edge.canvas(), self.edge.canvas()]
             k = self.edge.scale
+            # 画布坐标 + 画布在窗口里的偏移：吸附态窗口还带着气泡，
+            # 画布不一定在窗口原点
+            g = self._canvas_global()
             return QRect(g.x() + round(box[0] * k), g.y() + round(box[1] * k),
                          round((box[2] - box[0]) * k),
                          round((box[3] - box[1]) * k))
         _size, _bubble, frog = self._metrics()
-        return frog.translated(g.topLeft())
+        return frog.translated(self.geometry().topLeft())
+
+    def _edge_layout(self):
+        """吸附态排版：(窗口尺寸, 气泡矩形, 画布矩形)，顺带记下尾巴朝向。
+
+        气泡放**屏幕内侧**：蛙贴在边上，气泡往屋里伸，尾巴从朝向蛙的那一侧
+        伸出来指着头。窗口里画布永远顶着切口那一侧，所以「画布贴屏幕边」
+        这条硬规则不用因为加气泡而改，`pet_edge.snap_pos` 也因此不用改口径。
+
+        接的是**蛙可见的那条边**，不是画布边：256 的画布里蛙只占一条
+        （w 的可见盒 `base` 只有 70px 宽），按画布边摆气泡会离蛙一大截。
+        用全相位并集盒 `box` 而不是 `base`：抬手帧手会往外伸 35px，
+        按 base 摆的话那只手会被气泡压住。
+
+        `self._tail` 存 (朝向, 落点)，落点是尾巴那条边上的坐标（朝上下是 x，
+        朝左右是 y）。paintEvent 直接拿去画。
+        """
+        c = self.edge.size().width()
+        canvas = QRect(0, 0, c, c)
+        self._tail = ("down", None)
+        if not (bool(self.st.get("pet.show_bubble", True)) and self._text):
+            return QSize(c, c), None, canvas
+
+        body = pet.measure_bubble(self._font_factory(), self._text,
+                                  int(self.st.get("pet.bubble_w", 360)))
+        bw, bh = body.width(), body.height()
+        h, v = pet_edge.PIN.get(self._edge_dir, ("", ""))
+        t, pad = pet.BUBBLE_TAIL, BUBBLE_PAD
+        geo = self.edge.geo(self._edge_dir) or {}
+        base = geo.get("base") or [0, 0, c, c]
+        box = geo.get("box") or base
+        k = self.edge.scale
+        cut = geo.get("cut") or {"L": "left", "R": "right",
+                                 "T": "top", "B": "bottom"}.get(h or v, "")
+
+        if cut in ("left", "right"):
+            if cut == "left":
+                # 蛙可见部分在画布左边：气泡接在它右边，窗口往屋里长
+                bx = round(box[2] * k) + t + pad
+                w = max(c, bx + bw)
+            else:
+                # 反过来：气泡接在可见部分的左边，画布得留在窗口右端
+                w = max(c, c - round(box[0] * k) + t + pad + bw)
+                bx = w - c + round(box[0] * k) - t - pad - bw
+            hgt = max(c, bh)
+            cy = hgt - c if v == "B" else 0 if v == "T" else (hgt - c) // 2
+            canvas = QRect(0 if cut == "left" else w - c, cy, c, c)
+            # 尾巴对着嘴：可见盒从上往下 18% 就是嘴的位置（量过 w/e/sw/se），
+            # 对准盒子中点会指到肚子上，看着像在跟肚子说话
+            head = canvas.top() + round(
+                (base[1] + (base[3] - base[1]) * TAIL_HEAD) * k)
+            by = max(0, min(head - bh // 2, hgt - bh))
+            self._tail = ("left" if cut == "left" else "right", head)
+            return QSize(w, hgt), QRect(bx, by, bw, bh), canvas
+
+        # 上下贴边：画布水平居中（气泡比蛙宽时蛙才不会偏一边）
+        if cut == "top":
+            by = round(box[3] * k) + t + pad
+            hgt = max(c, by + bh)
+        else:
+            hgt = max(c, c - round(box[1] * k) + t + pad + bh)
+            by = hgt - c + round(box[1] * k) - t - pad - bh
+        w = max(c, bw)
+        canvas = QRect((w - c) // 2, 0 if cut == "top" else hgt - c, c, c)
+        head = canvas.left() + round((base[0] + base[2]) / 2 * k)
+        bx = max(0, min(head - bw // 2, w - bw))
+        self._tail = ("up" if cut == "top" else "down", head)
+        return QSize(w, hgt), QRect(bx, by, bw, bh), canvas
+
+    def _canvas_global(self) -> QPoint:
+        """画布（不是窗口）左上角的全局坐标。换气泡、改字号时以它为准不动。"""
+        return self._metrics()[2].topLeft() + self.pos()
+
+    def _reflow_edge(self, keep: QPoint | None = None) -> None:
+        """吸附态重排：气泡内容变了，但画布不能动。
+
+        画布的位置就是切口的位置，动一下切口就离了屏幕边。
+        """
+        keep = keep or self._canvas_global()
+        size, _bubble, canvas = self._edge_layout()
+        self.setFixedSize(size)
+        self.move(keep - canvas.topLeft())
+        self.update()
 
     def _snap_to(self, d: str, anchor: QPoint, animate: bool = True,
                  screen: QRect | None = None) -> bool:
@@ -211,15 +296,18 @@ class PetWindow(QWidget):
         geo = self.edge.geo(d)
         if geo is None:
             return False
-        size = self.edge.size()
+        self._edge_dir = d
+        self.edge_state.reset()
+        size, _bubble, canvas = self._metrics()    # 含气泡的整窗，不是画布
+        self.setFixedSize(size)
+
         scr = screen or self._screen_obj(anchor).availableGeometry()
         target = pet_edge.snap_pos(d, geo["base"], self.edge.canvas(),
-                                   self.edge.scale, size.width(), anchor, scr)
+                                   self.edge.scale, size, anchor, scr,
+                                   canvas.topLeft())
 
         frm = self.pos()
         self._snap_anim = None
-        self._edge_dir = d
-        self.setFixedSize(size)
         if animate and frm != target and self._timer.isActive():
             # 滑动全靠 _tick 推进；定时器没跑（比如刚 suspend 过）就直接落位，
             # 否则会停在半路，切口离了屏幕边不说，还再也回不来
@@ -227,7 +315,6 @@ class PetWindow(QWidget):
                                "dur": SNAP_ANIM_MS}
         else:
             self.move(target)
-        self.edge_state.reset()
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.update()
         return True
@@ -322,7 +409,8 @@ class PetWindow(QWidget):
         hit = self._hit(pos)
         over = hit == "frog"
         if self._edge_dir:
-            self.setCursor(Qt.CursorShape.OpenHandCursor if over
+            self.setCursor(Qt.CursorShape.PointingHandCursor if hit == "bubble"
+                           else Qt.CursorShape.OpenHandCursor if over
                            else Qt.CursorShape.ArrowCursor)
             if self.edge_state.set_hover(over):
                 self.update()
@@ -344,21 +432,21 @@ class PetWindow(QWidget):
             return
         self._text = text
         if self._edge_dir:
-            # 吸附态不显示气泡，位置更不能重排——重排就会把切口推离屏幕边
+            # 吸附态也念正文：只重排气泡，画布（切口）不动
+            self._reflow_edge()
             return
         self._place(first=False)
         self.update()
 
     def set_scale(self, scale: float):
         """改蛙的大小。气泡宽度不受影响，窗口按蛙脚锚点重新贴。"""
+        # 吸附态先在旧缩放下标好锚点：换完缩放再算，蛙心会跟着画布偏移漂几像素
+        anchor = self._frog_rect().center() if self._edge_dir else None
         self.sprite.set_scale(scale)
         self.edge.set_scale(scale)
         if self._edge_dir:
             # 缩放后画布也跟着变：重新贴同一条边，可见中心别动
-            d = self._edge_dir
-            c = self._frog_rect().center()
-            self.setFixedSize(self.edge.size())
-            self._snap_to(d, c, animate=False)
+            self._snap_to(self._edge_dir, anchor, animate=False)
             return
         self._place(first=False)
         self.update()
@@ -366,6 +454,7 @@ class PetWindow(QWidget):
     def relayout(self):
         """气泡宽度之类的排版参数变了：重算尺寸，锚点仍是蛙脚。"""
         if self._edge_dir:
+            self._reflow_edge()
             return
         self._place(first=False)
         self.update()
@@ -453,11 +542,11 @@ class PetWindow(QWidget):
         """(窗口尺寸, 气泡矩形, 蛙矩形)。气泡在上，蛙贴底居中。
 
         没书 / 关掉气泡时只剩蛙，返回 None 当气泡矩形 —— 跟手动隐藏一个样。
-        吸附态没有气泡：半个身子挂在墙上还顶着个对话框很奇怪（规格第 1 条）。
+        吸附态也是一样的三件套，只是气泡摆在屏幕内侧、尾巴转向蛙头，
+        排版交给 `_edge_layout`（画布永远顶着切口那一侧）。
         """
         if self._edge_dir:
-            n = self.edge.size()
-            return QSize(n.width(), n.height()), None, QRect(0, 0, n.width(), n.height())
+            return self._edge_layout()
 
         frog = self.sprite.size()
         if not bool(self.st.get("pet.show_bubble", True)) or not self._text:
@@ -475,7 +564,10 @@ class PetWindow(QWidget):
 
     def _place(self, first: bool):
         if self._edge_dir:
-            return          # 吸附态的位置只由贴边那一轴决定，别让排版变化把它挪走
+            # 吸附态位置由贴边那一轴决定，排版变化只许重排气泡，
+            # 画布（切口）必须钉在原地
+            self._reflow_edge()
+            return
         size, _bubble, _frog = self._metrics()
         if first:
             x = self.st.get("pet.x")
@@ -554,18 +646,24 @@ class PetWindow(QWidget):
                 p.setCompositionMode(
                     QPainter.CompositionMode.CompositionMode_SourceOver)
 
+                _size, bubble, box = self._metrics()
                 if self._edge_dir:
+                    # 吸附态第三项是**画布**矩形：素材图贴着切口那一侧画
                     pm = self.edge.pixmap(self._edge_dir, self.edge_state.phase)
                     if pm is not None and not pm.isNull():
-                        p.drawPixmap(0, 0, pm)
+                        p.drawPixmap(box.topLeft(), pm)
+                    if bubble is not None and self._text:
+                        tail, anchor = self._tail
+                        pet.draw_bubble(p, bubble, self._font_factory(),
+                                        self.st, self._text,
+                                        tail=tail, anchor=anchor)
                 else:
-                    _size, bubble, frog = self._metrics()
                     if bubble is not None and self._text:
                         pet.draw_bubble(p, bubble, self._font_factory(),
                                         self.st, self._text)
                     frames = self.sprite.frames(self.state.current)
                     if frames:
-                        pet.draw_pet(p, frog,
+                        pet.draw_pet(p, box,
                                      frames[min(self.state.frame, len(frames) - 1)])
             finally:
                 p.end()
@@ -575,18 +673,24 @@ class PetWindow(QWidget):
     # -------------------------------------------------- 鼠标
 
     def _hit(self, pos) -> str:
+        _size, bubble, box = self._metrics()
         if self._edge_dir:
-            # 传窗口坐标：EdgeAssets 缓存的就是缩放后的图，别再除一次 scale
+            if bubble is not None and self._text:
+                body = QRect(bubble.x(), bubble.y(), bubble.width(),
+                             bubble.height() + pet.BUBBLE_TAIL)
+                if body.contains(pos):
+                    return "bubble"
+            # 缓存的素材图就是画布那么大：传画布内坐标，别再减窗口原点
+            local = pos - box.topLeft()
             ok = self.edge.hit(self._edge_dir, self.edge_state.phase,
-                               int(pos.x()), int(pos.y()))
+                               int(local.x()), int(local.y()))
             return "frog" if ok else ""
-        _size, bubble, frog = self._metrics()
         if bubble is not None:
             body = QRect(bubble.x(), bubble.y(), bubble.width(),
                          bubble.height() + pet.BUBBLE_TAIL)
             if body.contains(pos):
                 return "bubble"
-        if frog.contains(pos):
+        if box.contains(pos):
             return "frog"
         return ""
 
@@ -652,7 +756,8 @@ class PetWindow(QWidget):
         hit = self._hit(ev.position().toPoint())
         if hit == "frog":
             if self._edge_dir:
-                # 吸附态点一下就播/停：气泡已经收起来了，蛙身是唯一能点的地方
+                # 吸附态没有动作动画（身子被切了一半，跳起来会把切口撕开），
+                # 点蛙身就等于点气泡：播 / 停
                 self.bubble_clicked.emit()
             else:
                 self.fx(pet.JUMPING)           # 摸它一下
@@ -684,13 +789,11 @@ class PetWindow(QWidget):
     def _menu(self, global_pos):
         menu = QMenu(self)
         if self._edge_dir:
-            # 贴在边上的时候「隐藏气泡」没意义（本来就没有），
-            # 得给一条下得来的路——不然只能靠拖，而拖是对着半个身子操作
+            # 给一条下得来的路——不然只能靠拖，而拖是对着半个身子操作
             menu.addAction("从屏幕上取下来").triggered.connect(self.unsnap)
-        else:
-            show = bool(self.st.get("pet.show_bubble", True))
-            menu.addAction("隐藏气泡" if show else "显示气泡").triggered.connect(
-                self._toggle_bubble)
+        show = bool(self.st.get("pet.show_bubble", True))
+        menu.addAction("隐藏气泡" if show else "显示气泡").triggered.connect(
+            self._toggle_bubble)
 
         label, enabled = self._speech_state()
         act = menu.addAction(label)

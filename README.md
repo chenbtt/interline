@@ -81,17 +81,18 @@
 吸附态的规则就一条：**画布贴着屏幕的那条边，就是切口所在的那条边**。所以贴边那一轴由屏幕边直接算出来，换帧、改大小、换台词都不重算位置——重算就把切口推出屏幕边了。
 
 - 松手时蛙可见部分离屏幕边 64px 以内才吸，四角优先于四边
-- 吸附后气泡收起、窗口变成 `256 × 奶蛙大小`，蛙滑过去（150ms，ease-out）
+- 吸附后本体仍是 `256 × 奶蛙大小`，蛙滑过去（150ms，ease-out）
+- **气泡跟着走**：摆到屏幕内侧、尾巴转向蛙头，接的是蛙可见盒那条边（不是画布边，画布里有一半是透明的）；换台词只重排气泡，画布不动
 - 身体不动，只眨眼（2–4 秒随机闪一帧）+ 鼠标压上来抬手；抬手时不眨眼
 - 鼠标判定按 alpha 采点，不按窗口矩形——可见像素只占一成到三成，左右贴边时半边是空的，按矩形判会「隔空招手」
 - 按住蛙身拖出来就变回站立的蛙，以可见部分的中心为锚，不跳
-- 点一下 = 播/停朗读：气泡收起了，蛙身是唯一能点的地方
+- 点一下 = 播/停朗读：点气泡和点蛙身都算
 - 位置记住（存的是「贴哪条边 + 沿边走到哪」的比例，换分辨率、拔副屏都还能落回原处）
 - 多屏时相邻的那条边不吸，否则会卡在两块屏中间；设置页可以整个关掉
 
 眨眼不进任何循环：停 2–4 秒随机，闪一帧 160 ms 就回来。不做呼吸是刻意的——顶边那张的呼吸动的是头，稍微给多一点就像在引体向上；侧姿态那 8px 躯干胀缩在 256px 上基本看不出来。想恢复把 `make_pet_edges.py` 里的 `BREATH` 打开，源图还在。
 
-规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)，判定与落位在 `pet_edge.py`。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（眨眼与抬爪）、`pet-snap.png`（真窗口贴八向的截图）。
+规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)，判定与落位在 `pet_edge.py`。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（眨眼与抬爪）、`pet-snap.png`（真窗口贴八向的截图）、`pet-snap-bubble.png`（贴边时气泡的四个朝向）。
 
 <p align="center">
   <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
@@ -212,6 +213,7 @@ python main.py                 # 正常启动
 python main.py --selftest      # 检查 Qt / 解析层 / 奶蛙素材 / TTS 引擎是否可用
 python main.py --petcheck      # 奶蛙切帧与绘制冒烟，导出一张合成图
 python main.py --edgecheck     # 贴边吸附：判定用例 + 真窗口贴八向截图
+python main.py --voicecheck    # 在线音色链路：联网合成 → MP3 解码 → 逐句播放
 python main.py --pdfcheck a.pdf # 只跑 PDF 解析，把结果打到临时文件
 ```
 

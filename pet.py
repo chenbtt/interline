@@ -378,8 +378,15 @@ def measure_bubble(font: QFont, text: str, max_w: int) -> QSize:
     return QSize(int(w), int(h))
 
 
-def draw_bubble(p: QPainter, body: QRect, font: QFont, st, text: str) -> None:
-    """气泡主体 + 指向蛙头的小尾巴。body 不含尾巴。"""
+def draw_bubble(p: QPainter, body: QRect, font: QFont, st, text: str,
+                tail: str = "down", anchor: float | None = None) -> None:
+    """气泡主体 + 指向蛙头的小尾巴。body 不含尾巴。
+
+    tail 是尾巴伸出的那一侧（`down` / `up` / `left` / `right`）。站着的时候
+    蛙在气泡下面，尾巴朝下；贴到屏幕左边时气泡在蛙的右侧，尾巴得朝左。
+    anchor 是尾巴落点在「尾巴那条边」上的坐标（朝上下时是 x，朝左右时是 y），
+    默认取中点；给了就让尾巴尽量对着蛙头，读起来才像在说话。
+    """
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     bg = QColor(st.get("colors.bg", "#0d0f12"))
@@ -391,13 +398,31 @@ def draw_bubble(p: QPainter, body: QRect, font: QFont, st, text: str) -> None:
     path = QPainterPath()
     path.addRoundedRect(bodyf, BUBBLE_RADIUS, BUBBLE_RADIUS)
 
-    cx = bodyf.center().x()
-    tail = QPainterPath()
-    tail.moveTo(cx - BUBBLE_TAIL, bodyf.bottom() - 1.0)
-    tail.lineTo(cx, bodyf.bottom() + BUBBLE_TAIL)
-    tail.lineTo(cx + BUBBLE_TAIL, bodyf.bottom() - 1.0)
-    tail.closeSubpath()
-    path = path.united(tail)
+    t = QPainterPath()
+    if tail in ("up", "down"):
+        cx = (bodyf.center().x() if anchor is None
+              else min(max(float(anchor), bodyf.left() + BUBBLE_RADIUS),
+                       bodyf.right() - BUBBLE_RADIUS))
+        if tail == "down":
+            y0, tip = bodyf.bottom() - 1.0, BUBBLE_TAIL
+        else:
+            y0, tip = bodyf.top() + 1.0, -BUBBLE_TAIL
+        t.moveTo(cx - BUBBLE_TAIL, y0)
+        t.lineTo(cx, y0 + tip)
+        t.lineTo(cx + BUBBLE_TAIL, y0)
+    else:
+        cy = (bodyf.center().y() if anchor is None
+              else min(max(float(anchor), bodyf.top() + BUBBLE_RADIUS),
+                       bodyf.bottom() - BUBBLE_RADIUS))
+        if tail == "right":
+            x0, tip = bodyf.right() - 1.0, BUBBLE_TAIL
+        else:
+            x0, tip = bodyf.left() + 1.0, -BUBBLE_TAIL
+        t.moveTo(x0, cy - BUBBLE_TAIL)
+        t.lineTo(x0 + tip, cy)
+        t.lineTo(x0, cy + BUBBLE_TAIL)
+    t.closeSubpath()
+    path = path.united(t)
 
     p.fillPath(path, bg)
     p.setPen(QPen(theme.overlay_pen(st, 44), 1.0))

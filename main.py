@@ -41,7 +41,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 52
+BUILD_VERSION = 53
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -2664,7 +2664,7 @@ def selftest() -> int:
     return rc
 
 
-def edgecheck() -> int:
+def voicecheck() -> int:
     """打包后验证在线音色整条链路：联网合成 → MP3 解码 → 逐句播放。
 
     spec 里剔掉了 ffmpeg 后端，只留 WMF；这个自检用来确认正式 exe
@@ -2713,7 +2713,7 @@ def edgecheck() -> int:
         log(traceback.format_exc())
         rc = 1
 
-    out = Path(tempfile.gettempdir()) / "interline_edgecheck.txt"
+    out = Path(tempfile.gettempdir()) / "interline_voicecheck.txt"
     try:
         out.write_text("\n".join(lines), encoding="utf-8")
     except Exception:
@@ -2959,23 +2959,41 @@ def edgecheck() -> int:
                 rc = 2
                 continue
             g = win.geometry()
+            _sz, bubble, cv = win._metrics()
+            # 吸附态窗口带着气泡，贴着屏幕边的是**画布**，不是窗口
+            cg = cv.translated(g.topLeft())
             cut = win.edge.geo(d)["cut"]
-            edge = {"left": g.x() == mock.left(),
-                    "right": g.x() + g.width() - 1 == mock.right(),
-                    "top": g.y() == mock.top(),
-                    "bottom": g.y() + g.height() - 1 == mock.bottom()}[cut]
-            # 抓图后按 alpha 再验一次：像素真的压在窗口边上，不是只算了坐标
+            edge = {"left": cg.left() == mock.left(),
+                    "right": cg.right() == mock.right(),
+                    "top": cg.top() == mock.top(),
+                    "bottom": cg.bottom() == mock.bottom()}[cut]
+            # 抓图后按 alpha 再验一次：像素真的压在切口那条边上，不是只算了坐标
             img = win.grab().toImage()
             if cut in ("left", "right"):
-                col = 0 if cut == "left" else img.width() - 1
-                ink = any(qAlpha(img.pixel(col, y)) > 8 for y in range(img.height()))
+                col = cv.left() if cut == "left" else cv.right()
+                ink = any(qAlpha(img.pixel(col, y)) > 8
+                          for y in range(cv.top(), cv.bottom() + 1))
             else:
-                row = 0 if cut == "top" else img.height() - 1
-                ink = any(qAlpha(img.pixel(x, row)) > 8 for x in range(img.width()))
-            ok = edge and ink
+                row = cv.top() if cut == "top" else cv.bottom()
+                ink = any(qAlpha(img.pixel(x, row)) > 8
+                          for x in range(cv.left(), cv.right() + 1))
+            # 气泡得在屏幕内侧，而且不能压住蛙（气泡是贴在蛙可见那一侧画的，
+            # 画布本身有一半是透明的，所以判据看蛙矩形、不看画布）
+            fr = win._frog_rect()
+            bub = True
+            if bubble is None:
+                bub = False
+                log("     ?? 吸附态没有气泡")
+            else:
+                body = bubble.translated(g.topLeft())
+                bub = mock.contains(body) and not body.intersects(fr)
+                if not bub:
+                    log(f"     ?? 气泡 {body} 越界或压住了蛙 {fr}")
+            ok = edge and ink and bub
             rc |= 0 if ok else 2
-            log(f"  {d:<3} 窗口 ({g.x():>4},{g.y():>3}) 切口={cut:<6} "
-                f"{'齐平' if edge else '离边'}/{'有像素' if ink else '空的!'} "
+            log(f"  {d:<3} 窗口 ({g.x():>4},{g.y():>3}) 画布 ({cg.x():>4},{cg.y():>3}) "
+                f"切口={cut:<6} {'齐平' if edge else '离边'}/"
+                f"{'有像素' if ink else '空的!'}/{'气泡' if bub else '无气泡'} "
                 f"{'ok' if ok else '??'}")
             shots[d] = (win.grab(), QPoint(g.x(), g.y()))
 
@@ -3103,8 +3121,8 @@ def main():
         return petcheck()
     if "--edgecheck" in sys.argv:
         return edgecheck()
-    if "--edgecheck" in sys.argv:
-        return edgecheck()
+    if "--voicecheck" in sys.argv:
+        return voicecheck()
     if "--updatecheck" in sys.argv:
         return updatecheck()
     if "--pdfcheck" in sys.argv:

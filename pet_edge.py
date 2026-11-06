@@ -76,36 +76,44 @@ def pick_dir(frog: QRect, screen: QRect, snap: int = SNAP,
     return "n" if dt <= db else "s"
 
 
-def snap_pos(d: str, base_box, canvas: int, scale: float, size: int,
-             anchor: QPoint, screen: QRect) -> QPoint:
+def snap_pos(d: str, base_box, canvas: int, scale: float, size: QSize,
+             anchor: QPoint, screen: QRect, off: QPoint | None = None) -> QPoint:
     """吸附后窗口该放哪。
 
     base_box 是画布内「基准帧可见部分」的包围盒（来自 meta.json），
     anchor 是希望**蛙可见部分的中心**落在的全局坐标——拖到哪就吸到哪，
     垂直于贴边方向的位置跟着走。
 
+    size 是**整窗**尺寸而不是画布：吸附态窗口还带着气泡，比 256 宽一截，
+    贴右边时要减整窗宽度，否则气泡会被顶到屏幕外去。off 是画布在窗口里
+    的偏移——只对**自由轴**有用：贴边那一轴上画布永远顶着切口那一侧，
+    所以窗口边就等于画布边，不用管 off。
+
     贴边那一轴由屏幕边直接算出，不参与 clamp：窗口边缘离开屏幕边，
     切口就离了屏幕边，那是这套素材唯一的硬约束。
     """
     h, v = PIN[d]
+    off = off or QPoint(0, 0)
     vcx = (base_box[0] + base_box[2]) / 2.0 * scale
     vcy = (base_box[1] + base_box[3]) / 2.0 * scale
+    ww, wh = size.width(), size.height()
 
     if h == "L":
         x = screen.left()
     elif h == "R":
-        x = screen.right() - size + 1
+        x = screen.right() - ww + 1
     else:
-        x = round(anchor.x() - vcx)
-        x = max(screen.left(), min(x, screen.right() - size + 1))
+        # 自由轴夹的是**整窗**：气泡也得留在屏幕里
+        x = round(anchor.x() - vcx) - off.x()
+        x = max(screen.left(), min(x, screen.right() - ww + 1))
 
     if v == "T":
         y = screen.top()
     elif v == "B":
-        y = screen.bottom() - size + 1
+        y = screen.bottom() - wh + 1
     else:
-        y = round(anchor.y() - vcy)
-        y = max(screen.top(), min(y, screen.bottom() - size + 1))
+        y = round(anchor.y() - vcy) - off.y()
+        y = max(screen.top(), min(y, screen.bottom() - wh + 1))
 
     return QPoint(x, y)
 
