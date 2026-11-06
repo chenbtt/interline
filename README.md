@@ -47,7 +47,7 @@
 
 主窗该有的全都还在——正文、目录、书签、书库、设置、页码、朗读按钮。点「书库」就在主窗里正常打开书库，点「目录」就翻目录，蛙一概不参与。两个窗口各管各的：拖蛙不会动主窗，主窗最小化、换主题、开书库，蛙只是继续念它的。
 
-九种动作接的是真状态，不是装饰：朗读时原地小跑，暂停时站着等，一句读完抬头看一眼，翻句朝对应的方向跑两步（`running-left` / `running-right`），加书签原地跳一下，读失败就愣住，闲置久了发呆。
+九种动作接的是真状态，不是装饰：朗读时原地小跑，**停下就抬手托腮停在那儿**（`thinking`，一次播完停在末帧，不循环），一句读完抬头看一眼，翻句朝对应的方向跑两步（`running-left` / `running-right`），加书签原地跳一下，读失败就愣住，闲置久了发呆。
 
 - 点奶蛙 = 摸它一下，它会捧腹大笑并放出笑声
 - 点气泡 = 开始 / 停止朗读（没开书时是去挑一本书）
@@ -67,7 +67,7 @@
 
 素材本身是低帧率的：每个动作只有 4–8 张关键帧，原速播放时单帧要停 70–125 ms，看着一顿一顿。补帧分两种做法：
 
-- **图生图补中间帧**（`make_pet_ai.py`，用于 `waiting` / `running` / `running-right` / `running-left` / `review` / `failed`）。把相邻两帧喂给图像模型，让它画「正好在两者中间」的那一帧。实测相邻帧步长降 30–36%，是唯一能把「整体不动、肢体大摆」的动作补干净的办法。
+- **图生图补中间帧**（`make_pet_ai.py`，用于 `thinking` / `running` / `running-right` / `running-left` / `review` / `failed`）。把相邻两帧喂给图像模型，让它画「正好在两者中间」的那一帧。实测相邻帧步长降 30–36%，是唯一能把「整体不动、肢体大摆」的动作补干净的办法。
 - **传统插值**（`make_pet_sheet.py` 里的质心补偿 + 交叉淡化，只用于 `idle`）。`idle` 相邻帧位移不到 1 像素，混合是干净的；换到跑动这类动作上会叠出两条腿。
 
 `waving` 和 `jumping` 不补帧，只把播放帧率提上来。前者模型把「抬手挥动」画成「手放在嘴边」还带出喙状变形（步长只降 18%），后者源素材带白色地面投影，喂进模型后投影在白底上消失，生成的中间帧跟前后帧对不上。
@@ -95,8 +95,9 @@
 规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)，判定与落位在 `pet_edge.py`。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（眨眼与抬爪）、`pet-snap.png`（真窗口贴八向的截图）、`pet-snap-bubble.png`（贴边时气泡的四个朝向）。
 
 <p align="center">
-  <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
-  <img src="screenshots/settings-pet.png" width="420" alt="奶蛙设置">
+  <img src="screenshots/pet-mode.png" width="560" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
+  <img src="screenshots/pet-thinking.png" width="300" alt="停下朗读后停在托腮的姿势">
+  <img src="screenshots/settings-pet.png" width="380" alt="奶蛙设置">
 </p>
 
 **老板键（`Ctrl+Alt+D`）**

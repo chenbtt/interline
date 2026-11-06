@@ -21,7 +21,7 @@
        192x208 的格子（这个 bug 让第一轮指标全错，误判成「模型不行」）。
 
 用法：
-    python make_pet_ai.py --prep waiting running      # 生成准备图到 build/naiwa_ai/in/
+    python make_pet_ai.py --prep thinking running     # 生成准备图到 build/naiwa_ai/in/
     # 然后用图生图工具逐对生成到 build/naiwa_ai/raw/<anim>/<i>_<j>.png
     python make_pet_ai.py --build                     # 抠底/对齐/宽度归一化 -> out/
 """
@@ -50,7 +50,7 @@ UPSCALE = 512 / FRAME_W          # 喂给模型的输入宽度
 #           生成的中间帧没有投影，跟前后帧对不上
 #   running-left 见 MIRROR：它是 running-right 的镜像，直接翻不用重新生成
 AI_ANIMS = {
-    "waiting":       (8, 6, True),
+    "thinking":      (8, 2, False),
     "running":       (6, 6, True),
     "running-right": (1, 8, True),
     "review":        (7, 6, False),

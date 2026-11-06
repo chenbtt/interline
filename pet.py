@@ -19,7 +19,7 @@ import theme
 
 IDLE = "idle"
 RUNNING = "running"
-WAITING = "waiting"
+THINKING = "thinking"      # 停下朗读后的姿势：抬手托腮，播一次就停住（不循环）
 WAVING = "waving"
 JUMPING = "jumping"
 REVIEW = "review"
@@ -27,10 +27,10 @@ FAILED = "failed"
 RUN_LEFT = "running-left"
 RUN_RIGHT = "running-right"
 
-BASE_STATES = (IDLE, RUNNING, WAITING)
+BASE_STATES = (IDLE, RUNNING, THINKING)
 
 # 瞬时动作的抢占权，大的能打断小的
-PRIORITY = {IDLE: 0, RUNNING: 0, WAITING: 0,
+PRIORITY = {IDLE: 0, RUNNING: 0, THINKING: 0,
             WAVING: 1, JUMPING: 1, REVIEW: 2, FAILED: 3,
             RUN_LEFT: 5, RUN_RIGHT: 5}
 

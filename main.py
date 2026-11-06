@@ -41,7 +41,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 53
+BUILD_VERSION = 54
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -1148,6 +1148,7 @@ class Reader(QWidget):
             if self.speech.running and not self.speech.paused:
                 self.speech.pause()
                 self._boss_paused = True
+                self._pet_sync_base()       # 蛙也在藏起来的路上，姿势先换成托腮
             self._hide_window(hide_pet=True)
         else:
             self._do_show()
@@ -1156,6 +1157,7 @@ class Reader(QWidget):
             if self._boss_paused:
                 self.speech.resume()
                 self._boss_paused = False
+                self._pet_sync_base()
 
     def closeEvent(self, ev):
         self._persist()
@@ -1699,6 +1701,9 @@ class Reader(QWidget):
             self.speech.stop()
             self._clear_highlight()
             self.btn_speak.setText("续")
+            # 引擎停掉时不一定会报状态回来，这里自己推一次：
+            # 奶蛙要切到「托腮等你」的姿势
+            self._pet_sync_base()
         else:
             if self._speech_paused and self._speech_pos >= 0:
                 # 「续」：从停下的那个词接上。先换个新引擎——
@@ -1739,6 +1744,7 @@ class Reader(QWidget):
         self._speech_char = 0
         self._speech_paused = False
         self.btn_speak.setText("听")
+        self._pet_sync_base()
 
     def _on_sentence(self, idx: int):
         # 一行模式下没有排版坐标，整块重排：文本换了，宽度也要跟着变
@@ -2125,7 +2131,7 @@ class Reader(QWidget):
         """右键菜单里那一条朗读项：文案 + 能不能点。"""
         if self.speech.running and not self.speech.paused:
             return "停止朗读", True
-        if self.speech.paused:
+        if self.speech.paused or self._speech_paused:
             return "继续朗读", True
         return "开始朗读", bool(self.book and self._tts_sentences)
 
@@ -2180,8 +2186,10 @@ class Reader(QWidget):
             return
         if self.speech.running and not self.speech.paused:
             name = pet.RUNNING
-        elif self.speech.paused:
-            name = pet.WAITING
+        elif self.speech.paused or self._speech_paused:
+            # 停了（手动按「停」或被老板键按下）：抬手托腮，播一次就停在
+            # 那个姿势上等用户回来，不再回到那个原地晃的循环
+            name = pet.THINKING
         else:
             name = pet.IDLE
         if self._pet_window is not None:
@@ -2819,7 +2827,7 @@ def petcheck() -> int:
             log("RESULT    = FAIL 精灵表读不出来")
             return 2
         log(f"frame     = {sp.size().width()}x{sp.size().height()}")
-        for name in (pet_mod.IDLE, pet_mod.RUNNING, pet_mod.WAITING,
+        for name in (pet_mod.IDLE, pet_mod.RUNNING, pet_mod.THINKING,
                      pet_mod.WAVING, pet_mod.JUMPING, pet_mod.FAILED,
                      pet_mod.REVIEW, pet_mod.RUN_LEFT, pet_mod.RUN_RIGHT):
             fr = sp.frames(name)

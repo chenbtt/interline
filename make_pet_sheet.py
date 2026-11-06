@@ -41,8 +41,14 @@ MIN_SHIFT = 2.5
 #   row0 idle（第 7 帧是首帧副本，去掉，用 6 帧）
 #   row1/row2 互为镜像，按眼睛朝向定为 right / left
 #   row3 waving(4) row4 jumping(5) row5 failed(8)
-#   row6 running(6) row7 review(6) row8 waiting(6)
+#   row6 running(6) row7 review(6) row8 thinking(2)
 #   row9/10 是 16 方向注视，不属于动画循环，不收
+#
+# thinking 只取 row8 的前两帧：第 1 帧垂手站着、第 2 帧手已经托在下巴上、
+# 另一条手臂横抱在肚子上（这就是「停下思考」要停住的那个姿势）。不循环，
+# 播完停在末帧——`PetState.tick` 对 loop=False 的动画本来就停在末帧。
+# row8 后面还有抱臂、双手叠腹这些帧，全收进来会变成「托腮→抱臂→托腮」的
+# 抽动，所以只切前两帧。
 #
 # 关于 fps：素材只有 4-8 帧，8fps 时单帧停留 125ms，看着一顿一顿。
 #
@@ -67,7 +73,7 @@ ROW_MAP = {
     "failed":        (5, 8, 9,  False, "ai"),
     "running":       (6, 6, 15, True,  "ai"),
     "review":        (7, 6, 10, False, "ai"),
-    "waiting":       (8, 6, 10, True,  "ai"),
+    "thinking":      (8, 2, 4,  False, "ai"),
 }
 
 # AI 中间帧目录（make_pet_ai.py --build 的产物）。找不到就整体退回传统插值。
