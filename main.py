@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 57
+BUILD_VERSION = 58
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -98,6 +98,37 @@ def make_icon() -> QIcon:
     logo.draw_logo(p, 256)
     p.end()
     return QIcon(pm)
+
+
+class FrogButton(QPushButton):
+    """底栏「奶读模式」：把「蛙」字换成单色蛙头图标。
+
+    图标自绘而不是 setIcon：底栏文字色是 QSS 按主题给的，QIcon 不会跟着变色，
+    深浅皮肤总有一边看不清。直接拿配置里的前景色画，hover 时提亮一档。
+    """
+    def __init__(self, st, parent=None):
+        super().__init__("", parent)
+        self.st = st
+        self.setObjectName("footBtn")
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        p = QPainter(self)
+        try:
+            col = QColor(self.st.get("colors.fg", "#c3cbd6"))
+            if not self.underMouse():
+                col.setAlpha(175)
+            pet.draw_frog_head(p, self.rect().adjusted(3, 1, -3, -1), col)
+        finally:
+            p.end()
+
+    def enterEvent(self, ev):
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self.update()
+        super().leaveEvent(ev)
 
 
 # ------------------------------------------------------------------ 主窗口
@@ -564,7 +595,7 @@ class Reader(QWidget):
         self.btn_speak = QPushButton("听")
         self.btn_font = QPushButton("Aa")
         self.btn_oneline = QPushButton("单")
-        self.btn_pet = QPushButton("蛙")
+        self.btn_pet = FrogButton(self.st)
         for b, w, tip in ((self.btn_speak, 24, "朗读（右键调语速和音色）"),
                           (self.btn_font, 28, "字号与行距"),
                           (self.btn_oneline, 24, "一行模式（F9）"),
@@ -2078,6 +2109,13 @@ class Reader(QWidget):
 
     def toggle_pet(self):
         if self._pet:
+            w = self._pet_window
+            # 气泡按钮刚把蛙藏起来时，F8 / 底栏蛙头是「唤回来」而不是关掉
+            if w is not None and not w.isVisible():
+                w.resume()
+                self._pet_sync_base()
+                self._set_hint("奶蛙回来了", 1600)
+                return
             self._exit_pet()
         else:
             self._enter_pet()
@@ -2133,6 +2171,8 @@ class Reader(QWidget):
             w.request_library.connect(self._pet_open_library)
             w.request_settings.connect(self._open_settings)
             w.exit_pet.connect(self._exit_pet)
+            w.hide_pet.connect(self._pet_hide)
+            w.show_main.connect(self._pet_show_main)
             w.quit_app.connect(QApplication.instance().quit)
             w.sound_started.connect(self._pet_duck_start)
             w.notice.connect(lambda s: self._set_hint(s, 4000))
@@ -2161,6 +2201,22 @@ class Reader(QWidget):
         """
         self._do_show()
         self.set_mode("books")
+
+    def _pet_hide(self):
+        """气泡按钮「隐藏奶蛙」：只收窗，朗读照旧。
+
+        不退出奶读模式，否则声音还在、按钮却连着窗口一起没了，等于把
+        「继续听」也一起关掉。唤回走 F8 / 底栏蛙头（见 toggle_pet）。
+        """
+        if self._pet_window is not None:
+            self._pet_window.suspend()
+        self._set_hint("奶蛙已隐藏，F8 / 托盘 / 主窗蛙头都能唤回", 3200)
+
+    def _pet_show_main(self):
+        """气泡按钮「显示主面板」：只把阅读器叫到前面，不打招呼、不抢朗读。"""
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _enter_pet(self):
         if self._pet:
@@ -2685,7 +2741,8 @@ def selftest() -> int:
             # 只查类和方法是否存在，不构造 QWidget（见下面 TTS 与 QPixmap 的坑）
             import pet_window
             need = ("start", "stop", "set_text", "fx", "suspend", "resume",
-                    "unsnap", "set_scale", "relayout")
+                    "unsnap", "set_scale", "relayout",
+                    "_toolbar", "_emit_tool", "hide_pet", "show_main")
             lacking = [n for n in need
                        if not hasattr(pet_window.PetWindow, n)]
             log(f"pet window= {'OK' if not lacking else 'MISSING ' + str(lacking)}")
@@ -2972,6 +3029,214 @@ def petcheck() -> int:
         log(f"RESULT    = FAIL {type(e).__name__}: {e}")
         log(traceback.format_exc())
         rc = 1
+    return rc
+
+
+def toolcheck() -> int:
+    """气泡悬停工具条 + 底栏蛙头图标的真窗口自检。
+
+    单独跑，不碰 TTS：这轮只画 QPainter / 抓 QWidget，建 QTextToSpeech
+    之后再动 QPixmap 会原生崩溃（见 --petcheck 的说明）。
+    除了算坐标，还要真点一遍五颗按钮、抓两张图，确认图标和底片都画出来了。
+    """
+    import tempfile
+
+    lines: list[str] = []
+    out = Path(tempfile.gettempdir()) / "interline_toolcheck.txt"
+    here = Path(__file__).resolve().parent
+
+    def log(msg: str):
+        lines.append(str(msg))
+        try:
+            out.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    os.environ.setdefault("INTERLINE_DATA_DIR",
+                          str(Path(tempfile.gettempdir()) / "interline_check"))
+    rc = 0
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    win = None
+    try:
+        import pet_window as pw
+        import store as store_mod
+
+        st = store_mod.Store()
+        st.set("pet.snap_dir", "")
+        text = ("我们试图用我们仅有的天分去表达我们深层的感受，去表达我们"
+                "对前人所有贡献的感激，去为历史长河加上一点儿什么")
+        win = pw.PetWindow(st, lambda: QFont(store_mod.UI_FONT),
+                           lambda: ("停止朗读", True))
+        if not win.start(text):
+            log("RESULT = FAIL 奶蛙素材读不出来")
+            return 2
+        win.hide()                       # 只借它的绘制，不弹到桌面
+        log(f"version = {BUILD_VERSION}")
+
+        size, bubble, frog = win._metrics()
+        log(f"  窗口 {size.width()}x{size.height()} / 气泡 "
+            f"{bubble.width()}x{bubble.height()} / 蛙 {frog.width()}x{frog.height()}")
+        rects, zone = win._toolbar()
+        ids = tuple(rects)
+        want_ids = pw.TOOL_LEFT + pw.TOOL_RIGHT
+        ok = ids == want_ids
+        rc |= 0 if ok else 2
+        log(f"  五颗按钮 {ids} {'ok' if ok else '?? 期望 ' + str(want_ids)}")
+
+        # 尺寸 / 落位：都在窗口内、气泡下方、互不重叠、不压正文
+        inside = all(0 <= r.left() and r.right() < size.width()
+                     and 0 <= r.top() and r.bottom() < size.height()
+                     for r in rects.values())
+        below = all(r.top() > bubble.bottom() for r in rects.values())
+        clear = all(not r.intersects(bubble) for r in rects.values())
+        ordered = (rects["prev"].left() < rects["play"].left()
+                   < rects["next"].left() < rects["hide"].left()
+                   < rects["main"].left())
+        # 站立帧头部可见宽度只占框的 0.36~0.64；两边各留 0.32 就碰不到头
+        head_clear = (rects["next"].right() < frog.left() + frog.width() * 0.32
+                      and rects["hide"].left()
+                      > frog.right() - frog.width() * 0.32)
+        ok = inside and below and clear and ordered and head_clear
+        rc |= 0 if ok else 2
+        log(f"  落位 窗口内 {inside} / 气泡下 {below} / 不压正文 {clear} / "
+            f"左三右二 {ordered} / 不压蛙头 {head_clear} "
+            f"{'ok' if ok else '??'}")
+
+        # 悬停带要把气泡和按钮连起来，中间不能断
+        mid = QPoint(bubble.center().x(), bubble.bottom() + 2)
+        zone_ok = zone.contains(mid) and all(
+            zone.contains(r.center()) for r in rects.values())
+        rc |= 0 if zone_ok else 2
+        log(f"  悬停带连续 {zone_ok} {'ok' if zone_ok else '??'}")
+
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        hits = {k: win._hit(r.center()) for k, r in rects.items()}
+        ok = all(v == "tool:" + k for k, v in hits.items())
+        rc |= 0 if ok else 2
+        log(f"  命中 {hits} {'ok' if ok else '??'}")
+        ok = win._hit(bubble.center()) == "bubble"
+        rc |= 0 if ok else 2
+        log(f"  气泡仍可点 {ok} {'ok' if ok else '??'}")
+
+        # 五颗按钮真的把对应信号抛出去
+        got: list[tuple] = []
+        win.step.connect(lambda d: got.append(("step", d)))
+        win.bubble_clicked.connect(lambda: got.append(("play",)))
+        win.hide_pet.connect(lambda: got.append(("hide",)))
+        win.show_main.connect(lambda: got.append(("main",)))
+        expect = {"prev": ("step", -1), "next": ("step", 1),
+                  "play": ("play",), "hide": ("hide",), "main": ("main",)}
+        fired = {}
+        for k in want_ids:
+            got.clear()
+            win._emit_tool(k)
+            fired[k] = tuple(got) == (expect[k],)
+        ok = all(fired.values())
+        rc |= 0 if ok else 2
+        log(f"  动作接线 {fired} {'ok' if ok else '??'}")
+
+        # 真鼠标事件链：悬停气泡 → 移到按钮 → 按下 → 松开 → 移开熄灭。
+        # 上面只验了各段方法，这里验它们串起来不打架（尤其别把按钮当拖拽）
+        from PyQt6.QtCore import QPointF
+        from PyQt6.QtGui import QMouseEvent
+
+        def send(t, pos, btn=Qt.MouseButton.NoButton,
+                 buttons=Qt.MouseButton.NoButton):
+            ev = QMouseEvent(t, QPointF(pos), QPointF(pos), btn, buttons,
+                             Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(win, ev)
+
+        center = rects["play"].center()
+        send(QEvent.Type.MouseMove, bubble.center())
+        on_bubble = win._tools_on
+        send(QEvent.Type.MouseMove, center)
+        on_button = win._tools_on and win._tool_hover == "play"
+        send(QEvent.Type.MouseButtonPress, center,
+             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+        no_drag = win._drag is None and win._tool_press == "play"
+        got.clear()
+        send(QEvent.Type.MouseButtonRelease, center,
+             Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+        clicked = tuple(got) == (("play",),)
+        send(QEvent.Type.MouseMove, QPoint(size.width() // 2, size.height() - 4))
+        off_ok = not win._tools_on
+        ok = on_bubble and on_button and no_drag and clicked and off_ok
+        rc |= 0 if ok else 2
+        log(f"  真鼠标链 亮起 {on_bubble} / 移到按钮 {on_button} / 不当拖拽 "
+            f"{no_drag} / 点击生效 {clicked} / 移开熄灭 {off_ok} "
+            f"{'ok' if ok else '??'}")
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+
+        # 播放键要跟着朗读状态换图标：暂停双竖条 vs 播放三角
+        pr = rects["play"]
+        orig = win._speech_state
+        win._speech_state = lambda: ("开始朗读", True)
+        play_img = win.grab().toImage()
+        win._speech_state = lambda: ("停止朗读", True)
+        pause_img = win.grab().toImage()
+        win._speech_state = orig
+        diff = sum(1 for y in range(pr.top(), pr.bottom() + 1)
+                   for x in range(pr.left(), pr.right() + 1)
+                   if play_img.pixel(x, y) != pause_img.pixel(x, y))
+        ok = diff >= 12
+        rc |= 0 if ok else 2
+        log(f"  播放/暂停图标切换 {diff} 像素 {'ok' if ok else '??'}")
+
+        # 出图：真窗口抓下来铺到深色桌面上
+        pm = win.grab()
+        board = QImage(pm.width() + 40, pm.height() + 40,
+                       QImage.Format.Format_RGB32)
+        board.fill(QColor("#12161b"))
+        bp = QPainter(board)
+        bp.drawPixmap(20, 20, pm)
+        bp.end()
+        shot = here / "screenshots" / "pet-tools.png"
+        shot = shot if shot.parent.is_dir() else (
+            Path(tempfile.gettempdir()) / "interline_tools.png")
+        ok = bool(board.save(str(shot)))
+        rc |= 0 if ok else 2
+        log(f"  工具条预览 = {shot}" if ok else "  工具条预览 = 保存失败")
+
+        # 底栏蛙头按钮：深浅两套前景色各抓一张，放大 8 倍供肉眼回归
+        ib = QImage(24 * 8 * 2 + 60, 20 * 8 + 40,
+                    QImage.Format.Format_RGB32)
+        ib.fill(QColor("#12161b"))
+        ip = QPainter(ib)
+        for i, (fg, bgc) in enumerate((("#c3cbd6", "#252a31"),
+                                       ("#2b3038", "#e8e4da"))):
+            st.set("colors.fg", fg)
+            b = FrogButton(st)
+            b.setFixedSize(24, 20)
+            b.setStyleSheet(
+                f"QPushButton#footBtn {{ background:{bgc}; border:none; "
+                f"border-radius:5px; }}")
+            ip.drawPixmap(20 + i * (24 * 8 + 20), 20,
+                          b.grab().scaled(24 * 8, 20 * 8))
+            b.deleteLater()
+        ip.end()
+        shot2 = here / "screenshots" / "pet-footbtn.png"
+        shot2 = shot2 if shot2.parent.is_dir() else (
+            Path(tempfile.gettempdir()) / "interline_footbtn.png")
+        ok = bool(ib.save(str(shot2)))
+        rc |= 0 if ok else 2
+        log(f"  蛙头按钮预览 = {shot2}" if ok else "  蛙头按钮预览 = 保存失败")
+
+        # 熄灭后按钮不该再吃点击
+        win._set_tools(False)
+        ok = win._hit(rects["play"].center()) != "tool:play"
+        rc |= 0 if ok else 2
+        log(f"  熄灭后不吃点击 {ok} {'ok' if ok else '??'}")
+        log("RESULT = OK")
+    except Exception as e:
+        import traceback
+        log(f"RESULT = FAIL {type(e).__name__}: {e}")
+        log(traceback.format_exc())
+        rc = 1
+    finally:
+        if win is not None:
+            win.stop()
     return rc
 
 
@@ -3350,6 +3615,8 @@ def main():
         return petcheck()
     if "--edgecheck" in sys.argv:
         return edgecheck()
+    if "--toolcheck" in sys.argv:
+        return toolcheck()
     if "--voicecheck" in sys.argv:
         return voicecheck()
     if "--updatecheck" in sys.argv:

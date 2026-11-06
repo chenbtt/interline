@@ -23,7 +23,7 @@ import time
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter
-from PyQt6.QtWidgets import QApplication, QMenu, QWidget
+from PyQt6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
 
 import pet
 import pet_audio
@@ -36,6 +36,23 @@ GREET_DELAY_MS = 200   # 出现后隔多久打招呼（让首帧和音频链路�
 SNAP_ANIM_MS = 150     # 吸附时滑过去的时间
 TAIL_HEAD = 0.18       # 吸附态气泡尾巴的落点：可见盒从上往下 18% 处（嘴的位置）
 
+# 气泡悬停工具条：左三（上一句 / 播放切换 / 下一句）、右二（隐藏奶蛙 / 显示主面板）
+TOOL_BTN = 22          # 单颗按钮边长
+TOOL_GAP = 6           # 组内间距
+TOOL_INSET = 4         # 距窗口左右边
+TOOL_Y_GAP = 3         # 距气泡底边
+TOOL_FADE_MS = 130     # 淡入淡出时长
+TOOL_LEFT = ("prev", "play", "next")
+TOOL_RIGHT = ("hide", "main")
+TOOL_TIPS = {
+    "prev": "上一句",
+    "play": "开始 / 停止朗读",
+    "next": "下一句",
+    "hide": "隐藏奶蛙（F8 / 托盘 / 主窗蛙头唤回）",
+    "main": "显示主面板",
+}
+TOOL_TIP_DELAY_MS = 420
+
 
 class PetWindow(QWidget):
     # ---- 交给主窗处理的业务动作 ----
@@ -47,6 +64,8 @@ class PetWindow(QWidget):
     request_settings = pyqtSignal()
     exit_pet = pyqtSignal()
     quit_app = pyqtSignal()
+    hide_pet = pyqtSignal()             # 只藏蛙，朗读照旧；F8 或主窗蛙头唤回
+    show_main = pyqtSignal()            # 把阅读器叫到前面
     sound_started = pyqtSignal(int)     # 音效时长，让主窗压低朗读
     moved = pyqtSignal(int, int)        # 拖完存位置
     notice = pyqtSignal(str)
@@ -69,6 +88,12 @@ class PetWindow(QWidget):
         self._drag = None
         self._last_ms = 0.0
         self._idle_ms = 0.0
+        # 悬停工具条：只在站立形态出现，指针从气泡移到按钮的整条带上都算「还在」
+        self._tools_on = False
+        self._tools_alpha = 0.0
+        self._tool_hover = ""
+        self._tool_press = ""
+        self._tool_tip_at = QPoint()
 
         self.setWindowFlags(Qt.WindowType.Tool
                             | Qt.WindowType.FramelessWindowHint)
@@ -86,6 +111,9 @@ class PetWindow(QWidget):
         self._greet_timer = QTimer(self)
         self._greet_timer.setSingleShot(True)
         self._greet_timer.timeout.connect(self._greet)
+        self._tip_timer = QTimer(self)
+        self._tip_timer.setSingleShot(True)
+        self._tip_timer.timeout.connect(self._show_tool_tip)
 
     # -------------------------------------------------- 生命周期
 
@@ -98,6 +126,9 @@ class PetWindow(QWidget):
         self.edge.set_scale(float(self.st.get("pet.scale", 0.9)))
         self.sync_on_top(bool(self.st.get("always_on_top", True)))
         self._text = text or ""
+        self._tools_on = False
+        self._tools_alpha = 0.0
+        self._tool_press = ""
         self._place(first=True)
         # 上次是贴着边关掉的，就还贴在那儿——否则每次开奶读模式它都要
         # 从边上「掉」回桌面中间，看着像丢了一只
@@ -127,6 +158,10 @@ class PetWindow(QWidget):
         self.state.reset()
         self._drag = None
         self._snap_anim = None
+        self._set_tools(False)
+        self._tools_alpha = 0.0
+        self._tip_timer.stop()
+        QToolTip.hideText()
         self.save_pos()
         # 收起前把吸附态清掉：下次 start() 会按配置重新贴，
         # 留着的话窗口会以 256 的尺寸回到站立形态，画出来是空的
@@ -141,6 +176,10 @@ class PetWindow(QWidget):
             self._audio.stop()
         # 藏起来时指针不一定还在蛙身上，留着 hi 会让它一露面就举着手
         self.edge_state.set_hover(False)
+        self._set_tools(False)
+        self._tools_alpha = 0.0
+        self._tip_timer.stop()
+        QToolTip.hideText()
         self.hide()
 
     def resume(self):
@@ -296,6 +335,9 @@ class PetWindow(QWidget):
         geo = self.edge.geo(d)
         if geo is None:
             return False
+        # 贴边形态不摆工具条，别让站立态亮着的条子残留一个空状态机
+        self._set_tools(False)
+        self._tools_alpha = 0.0
         self._edge_dir = d
         self.edge_state.reset()
         size, _bubble, canvas = self._metrics()    # 含气泡的整窗，不是画布
@@ -400,26 +442,114 @@ class PetWindow(QWidget):
             anchor = c
         self._snap_to(d, anchor, animate=False)
 
+    # -------------------------------------------------- 气泡悬停工具条
+
+    def _toolbar(self):
+        """(按钮矩形表, 连续悬停带)。
+
+        按钮排在气泡下面一行：三颗贴窗口左边、两颗贴右边，中间留给蛙头。
+        站立帧的头部实际只有约 45px 宽（173px 的框里大半是透明的），
+        所以哪怕气泡很窄、窗口只有蛙那么宽，两边也放得下——**不要**为工具条
+        把窗口撑大，撑出来的透明区一样会拦鼠标，等于凭空多一块点不到的桌面。
+        """
+        if self._edge_dir or not self._text:
+            return {}, QRect()
+        size, bubble, _frog = self._metrics()
+        if bubble is None:
+            return {}, QRect()
+        y = bubble.bottom() + TOOL_Y_GAP
+        step = TOOL_BTN + TOOL_GAP
+        lw = len(TOOL_LEFT) * step - TOOL_GAP
+        rw = len(TOOL_RIGHT) * step - TOOL_GAP
+        rects = {}
+        for i, k in enumerate(TOOL_LEFT):
+            rects[k] = QRect(TOOL_INSET + i * step, y, TOOL_BTN, TOOL_BTN)
+        for i, k in enumerate(TOOL_RIGHT):
+            rects[k] = QRect(size.width() - TOOL_INSET - rw + i * step,
+                             y, TOOL_BTN, TOOL_BTN)
+        # 从气泡底边一直盖到按钮下沿：指针从气泡挪到按钮的途中不许熄灭
+        zone = QRect(0, bubble.bottom(), size.width(),
+                     TOOL_Y_GAP + TOOL_BTN + 6)
+        return rects, zone
+
+    def _set_tools(self, on: bool) -> None:
+        on = bool(on) and self._drag is None
+        if self._tools_on == on:
+            return
+        self._tools_on = on
+        if not on:
+            self._tool_hover = ""
+            self._tool_press = ""
+            self._tip_timer.stop()
+            QToolTip.hideText()
+        self.update()
+
+    def _tool_at(self, pos) -> str:
+        if not self._tools_on:
+            return ""
+        rects, _ = self._toolbar()
+        for k, r in rects.items():
+            if r.contains(pos):
+                return k
+        return ""
+
+    def _show_tool_tip(self) -> None:
+        if self._tools_on and self._tool_hover:
+            QToolTip.showText(self._tool_tip_at,
+                              TOOL_TIPS.get(self._tool_hover, ""), self)
+
+    def _emit_tool(self, kind: str) -> None:
+        if kind == "prev":
+            self.step.emit(-1)
+        elif kind == "next":
+            self.step.emit(1)
+        elif kind == "play":
+            # 没书时走「挑一本」，有书时播 / 停，跟点气泡一致
+            self.bubble_clicked.emit()
+        elif kind == "hide":
+            self.hide_pet.emit()
+        elif kind == "main":
+            self.show_main.emit()
+
     def _hover_at(self, pos) -> None:
-        """鼠标移动时按 alpha 判 hover。
+        """鼠标移动时按 alpha 判 hover，顺带管气泡工具条的显隐。
 
         窗口是 256 见方，可见像素只占一成到三成，左右贴边时半边都是空的；
         按矩形判的话指针还离蛙十几像素它就开始挥手了。
         """
+        _rects, zone = self._toolbar()
         hit = self._hit(pos)
+        tool = hit[5:] if hit.startswith("tool:") else ""
+        want = (not self._edge_dir
+                and (hit == "bubble" or bool(tool)
+                     or (_rects and zone.contains(pos))))
+        self._set_tools(want)
+
+        self._tool_hover = tool if self._tools_on else ""
+        if self._tool_hover:
+            self._tool_tip_at = self.mapToGlobal(pos)
+            self._tip_timer.start(TOOL_TIP_DELAY_MS)
+        else:
+            self._tip_timer.stop()
+            QToolTip.hideText()
+
         over = hit == "frog"
+        pointing = hit == "bubble" or bool(tool)
         if self._edge_dir:
-            self.setCursor(Qt.CursorShape.PointingHandCursor if hit == "bubble"
+            self.setCursor(Qt.CursorShape.PointingHandCursor if pointing
                            else Qt.CursorShape.OpenHandCursor if over
                            else Qt.CursorShape.ArrowCursor)
             if self.edge_state.set_hover(over):
                 self.update()
             return
-        self.setCursor(Qt.CursorShape.PointingHandCursor if hit == "bubble"
+        self.setCursor(Qt.CursorShape.PointingHandCursor if pointing
                        else Qt.CursorShape.OpenHandCursor if over
                        else Qt.CursorShape.ArrowCursor)
 
     def leaveEvent(self, ev):
+        self._set_tools(False)
+        self._tip_timer.stop()
+        QToolTip.hideText()
         if self._edge_dir and self.edge_state.set_hover(False):
             self.update()
         super().leaveEvent(ev)
@@ -602,6 +732,15 @@ class PetWindow(QWidget):
         self._last_ms = now
         dt = max(0.0, min(dt, 200.0))       # 休眠回来别一次跳几百帧
 
+        # 工具条淡入淡出。放在贴边分支之前：吸附态也要能把已亮起的条子收干净
+        target = 1.0 if self._tools_on else 0.0
+        if self._tools_alpha != target:
+            step = dt / TOOL_FADE_MS
+            self._tools_alpha = (min(1.0, self._tools_alpha + step)
+                                 if self._tools_on
+                                 else max(0.0, self._tools_alpha - step))
+            self.update()
+
         if self._snap_anim is not None:
             a = self._snap_anim
             a["t"] += dt
@@ -677,6 +816,20 @@ class PetWindow(QWidget):
                     if frames:
                         pet.draw_pet(p, box,
                                      frames[min(self.state.frame, len(frames) - 1)])
+
+                # 工具条最后画：它压在气泡下沿与蛙头的空白带上
+                if self._tools_alpha > 0.01:
+                    rects, _ = self._toolbar()
+                    if rects:
+                        label, _enabled = self._speech_state()
+                        playing = label == "停止朗读"
+                        p.save()
+                        p.setOpacity(self._tools_alpha)
+                        for k, r in rects.items():
+                            pet.draw_tool_button(
+                                p, r, k, self.st,
+                                hover=(k == self._tool_hover), playing=playing)
+                        p.restore()
             finally:
                 p.end()
         except Exception:
@@ -685,6 +838,10 @@ class PetWindow(QWidget):
     # -------------------------------------------------- 鼠标
 
     def _hit(self, pos) -> str:
+        # 工具按钮压在气泡命中区的下沿上，必须先判，否则点按钮会当成点气泡
+        tool = self._tool_at(pos)
+        if tool:
+            return "tool:" + tool
         _size, bubble, box = self._metrics()
         if self._edge_dir:
             if bubble is not None and self._text:
@@ -713,12 +870,19 @@ class PetWindow(QWidget):
             return
         if ev.button() != Qt.MouseButton.LeftButton:
             return
+        tool = self._tool_at(ev.position().toPoint())
+        if tool:
+            # 按在按钮上不是拖拽：记下目标，松开时还在同一颗上才算点
+            self._tool_press = tool
+            ev.accept()
+            return
         if self._edge_dir and self._hit(ev.position().toPoint()) != "frog":
             # 吸附态画布一半是空的，按在空处不该把蛙拖走
             return
         gp = ev.globalPosition().toPoint()
         self._drag = {"start": gp, "win": self.pos(),
                       "last_x": gp.x(), "moved": False}
+        self._set_tools(False)
         self.setCursor(Qt.CursorShape.ClosedHandCursor)
         ev.accept()
 
@@ -752,6 +916,12 @@ class PetWindow(QWidget):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
+        if self._tool_press:
+            kind, self._tool_press = self._tool_press, ""
+            if self._tool_at(ev.position().toPoint()) == kind:
+                self._emit_tool(kind)
+            ev.accept()
+            return
         d = self._drag
         self._drag = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)

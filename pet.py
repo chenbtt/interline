@@ -476,3 +476,138 @@ def draw_bubble(p: QPainter, body: QRect, font: QFont, st, text: str,
         # 用 (x, y) 重载：QRect + flags 那套在不同 Qt 版本上行为有差异
         p.drawText(inner.x(), y + fm.ascent(), s)
         y += line_height(font)
+
+
+# ---------------------------------------------------------------- 单色图标
+
+# 奶蛙头部剪影：从用户给的 64×54 头像逐像素量出轮廓，归一化到 0..1。
+# 14 个控制点，运行时用 quadTo 平滑（顶点作控制点、相邻中点为落点）。
+# 做成矢量而不是 PNG：右下角那颗按钮只有 24×20，换主题时直接换填充色，
+# 不必为深浅两套各存一张图，也不必改打包清单。
+FROG_HEAD = (
+    (0.172, 0.389), (0.203, 0.426), (0.172, 0.463), (0.172, 0.574),
+    (0.266, 0.759), (0.281, 0.852), (0.250, 0.981), (0.984, 0.981),
+    (0.984, 0.833), (0.797, 0.389), (0.688, 0.241), (0.562, 0.185),
+    (0.422, 0.185), (0.281, 0.259),
+)
+FROG_EYE = (0.391, 0.333, 0.125, 0.130)     # x, y, w, h（归一化）
+FROG_MOUTH = (0.203, 0.556, 0.188, 0.048)
+
+
+def frog_head_path(rect: QRectF) -> QPainterPath:
+    """单色蛙头路径。眼睛和嘴是反向子路径，按奇偶数填充挖空。"""
+    pts = [(rect.x() + x * rect.width(), rect.y() + y * rect.height())
+           for x, y in FROG_HEAD]
+    path = QPainterPath()
+    path.moveTo((pts[-1][0] + pts[0][0]) / 2, (pts[-1][1] + pts[0][1]) / 2)
+    for i, (cx, cy) in enumerate(pts):
+        nx, ny = pts[(i + 1) % len(pts)]
+        path.quadTo(cx, cy, (cx + nx) / 2, (cy + ny) / 2)
+    path.closeSubpath()
+
+    ex, ey, ew, eh = FROG_EYE
+    path.addEllipse(QRectF(rect.x() + ex * rect.width(),
+                           rect.y() + ey * rect.height(),
+                           ew * rect.width(), eh * rect.height()))
+    mx, my, mw, mh = FROG_MOUTH
+    mr = QRectF(rect.x() + mx * rect.width(), rect.y() + my * rect.height(),
+                mw * rect.width(), mh * rect.height())
+    r = min(mr.width(), mr.height()) / 2
+    path.addRoundedRect(mr, r, r)
+    path.setFillRule(Qt.FillRule.OddEvenFill)
+    return path
+
+
+def draw_frog_head(p: QPainter, rect, color: QColor) -> None:
+    """把单色蛙头画进 rect，保持 64:54 比例、居中。"""
+    if isinstance(rect, QRect):
+        rect = QRectF(rect)
+    ratio = 64.0 / 54.0
+    w = min(rect.width(), rect.height() * ratio)
+    h = w / ratio
+    box = QRectF(rect.center().x() - w / 2, rect.center().y() - h / 2, w, h)
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    p.drawPath(frog_head_path(box))
+    p.restore()
+
+
+# 气泡工具条：五颗按钮的单色线条图标，22 见方是设计基准
+TOOL_IDS = ("prev", "play", "next", "hide", "main")
+
+
+def _tool_glyph(p: QPainter, rect: QRect, kind: str,
+                color: QColor, playing: bool) -> None:
+    s = rect.width() / 22.0
+
+    def X(v):
+        return rect.left() + v * s
+
+    def Y(v):
+        return rect.top() + v * s
+
+    pen = QPen(color, max(1.2, 1.7 * s))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(color)
+
+    def tri(a, b, c):
+        path = QPainterPath()
+        path.moveTo(X(a[0]), Y(a[1]))
+        path.lineTo(X(b[0]), Y(b[1]))
+        path.lineTo(X(c[0]), Y(c[1]))
+        path.closeSubpath()
+        p.drawPath(path)
+
+    def line(a, b, c=None):
+        path = QPainterPath()
+        path.moveTo(X(a[0]), Y(a[1]))
+        path.lineTo(X(b[0]), Y(b[1]))
+        if c is not None:
+            path.lineTo(X(c[0]), Y(c[1]))
+        p.drawPath(path)
+
+    if kind == "prev":                       # 上一句：竖条 + 左向三角
+        p.drawRect(QRectF(X(4.5), Y(6), 1.9 * s, 10 * s))
+        tri((8.5, 11), (16, 5.5), (16, 16.5))
+    elif kind == "next":                     # 下一句：镜像
+        tri((6, 5.5), (6, 16.5), (15.5, 11))
+        p.drawRect(QRectF(X(15.6), Y(6), 1.9 * s, 10 * s))
+    elif kind == "play":                     # 播 / 停：三角 ↔ 双竖条
+        if playing:
+            p.drawRect(QRectF(X(6.5), Y(5.6), 2.8 * s, 10.8 * s))
+            p.drawRect(QRectF(X(12.7), Y(5.6), 2.8 * s, 10.8 * s))
+        else:
+            tri((7.5, 5.2), (7.5, 16.8), (16.2, 11))
+    elif kind == "hide":                     # 收起：向下折角 + 底线
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        line((5.5, 8.5), (11, 13.5), (16.5, 8.5))
+        line((5, 16.5), (17, 16.5))
+    elif kind == "main":                     # 主面板：窗口 + 标题栏
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        box = QPainterPath()
+        box.addRoundedRect(QRectF(X(4.5), Y(5), 13 * s, 12 * s),
+                           1.8 * s, 1.8 * s)
+        p.drawPath(box)
+        line((4.5, 9), (17.5, 9))
+
+
+def draw_tool_button(p: QPainter, rect: QRect, kind: str, st,
+                     hover: bool = False, playing: bool = False) -> None:
+    """一颗气泡工具按钮：圆角底片 + 单色图标。底色沿用气泡，随主题走。"""
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    bg = QColor(st.get("colors.bg", "#0d0f12"))
+    bg.setAlpha(max(205, min(248, int(st.get("bg_alpha", 236))
+                             + (10 if hover else 0))))
+    fg = QColor(st.get("colors.fg", "#c3cbd6"))
+    fg.setAlpha(255 if hover else 205)
+    bodyf = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    p.setPen(QPen(theme.overlay_pen(st, 90 if hover else 40), 1.0))
+    p.setBrush(bg)
+    p.drawRoundedRect(bodyf, 5, 5)
+    _tool_glyph(p, rect, kind, fg, playing)
+    p.restore()
