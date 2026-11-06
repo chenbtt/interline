@@ -3,8 +3,13 @@
     python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图
     python make_pet_edges.py --build    # 抠图 + 摆放 + 八个方向裁切
     python make_pet_edges.py --sheet    # 出一张预览拼图
+    python make_pet_edges.py --context  # 出一张模拟桌面贴边的场景图
 
 产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}.png（256x256 RGBA）
+
+素材来源是两个目录，各取第一张：
+    build/naiwa_edges/raw/     斜姿态。出七张（四边里的三条 + 四角）
+    build/naiwa_edges/raw_n/   探身下望。只出 edge-n；缺省则退回对半切
 
 设计约定（接入时唯一需要记住的规则）：
     画布靠窗口的那条边 == 窗口边缘。
@@ -25,10 +30,22 @@ SRC = HERE / "assets" / "naiwa" / "sheet.png"
 OUT = HERE / "assets" / "naiwa" / "edges"
 BUILD = HERE / "build" / "naiwa_edges"
 REF = BUILD / "ref"
-RAW = BUILD / "raw"
+
+# 源姿态图跟成品放在一起，不进 build/：build/ 是 gitignore 的，
+# 源图放那儿等于「重新克隆后 --build 会静默退化」，而退化只有肉眼看得出
+SRC_SIDE = OUT / "src" / "side"     # 斜姿态，出七张
+SRC_PEEK = OUT / "src" / "peek"     # 探身下望，只出顶边
 
 CANVAS = 256          # 画布边长（正方形，四角留够斜探空间）
 FROG_H = 224          # 摆位后蛙的高度：与站立帧 208 接近，吸附时不跳大小墙
+
+# 顶边那张是单独作画的：蛙趴在边缘上往下探，我们从上后方看它的**背**，
+# 肚皮压在边缘上根本看不到。这张的比例不能按身高归一——它画的是
+# 「头 + 一大截背」，背有多长完全看模型心情，按整体归一头部就会缩没。
+# 所以按头宽定尺度（蛙宽 187 时头宽约 84，与站立帧的 84~90 对得上），
+# 再把超过 PEEK_MAX_H 的背裁掉：那段在屏幕外，裁了没人看得见。
+PEEK_W = 187
+PEEK_MAX_H = 150
 
 DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 
@@ -45,7 +62,8 @@ def idle_frame() -> Image.Image:
 
 def prep() -> None:
     REF.mkdir(parents=True, exist_ok=True)
-    RAW.mkdir(parents=True, exist_ok=True)
+    SRC_SIDE.mkdir(parents=True, exist_ok=True)
+    SRC_PEEK.mkdir(parents=True, exist_ok=True)
     fr = idle_frame()
     fr.save(REF / "idle.png")
 
@@ -56,6 +74,7 @@ def prep() -> None:
     canvas.convert("RGB").save(REF / "idle_ref.png")
     print(f"参考帧 = {REF / 'idle.png'}  ({fr.width}x{fr.height})")
     print(f"参考大图 = {REF / 'idle_ref.png'}  (1024x1024)")
+    print(f"源姿态图放这里：{SRC_SIDE}（斜姿态）/ {SRC_PEEK}（探身下望）")
 
 
 # ---------------------------------------------------------------- 抠图对齐
@@ -97,9 +116,12 @@ def cutout(src: Path, size: tuple[int, int]) -> Image.Image:
     box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
     cut = Image.fromarray(rgba[box[1]:box[3], box[0]:box[2]], "RGBA")
 
-    # 缩放到固定高度，宽度按比例
-    w = max(1, round(cut.width * size[1] / cut.height))
-    return cut.resize((w, size[1]), Image.LANCZOS)
+    # 缩放到固定尺寸：size 里哪一项为 0 就按另一项等比算
+    if size[1]:
+        w = max(1, round(cut.width * size[1] / cut.height))
+        return cut.resize((w, size[1]), Image.LANCZOS)
+    h = max(1, round(cut.height * size[0] / cut.width))
+    return cut.resize((size[0], h), Image.LANCZOS)
 
 
 # ---------------------------------------------------------------- 摆位与遮罩
@@ -192,21 +214,49 @@ def place(frog: Image.Image, cut: str, ratio: float, valign: str | None) -> Imag
     return canvas
 
 
+def place_peek(frog: Image.Image) -> Image.Image:
+    """顶边专用：蛙趴在边缘上往下探，身子在屏幕外。
+
+    这张图本身画的就是「头在下、身体被画面上边切平」的构图，所以不套
+    上面那套裁切比例——可见像素顶到画布上边，切口自然就落在那里。
+    """
+    c = CANVAS
+    canvas = Image.new("RGBA", (c, c), (0, 0, 0, 0))
+    _paste(canvas, frog, (c - frog.width) // 2, 0)
+    return canvas
+
+
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    srcs = sorted(RAW.glob("*.png"))
+    srcs = sorted(SRC_SIDE.glob("*.png"))
     if not srcs:
-        print(f"没有素材：把图生图结果放进 {RAW}")
+        print(f"没有素材：把图生图结果放进 {SRC_SIDE}")
         return
 
     base = cutout(srcs[0], (0, FROG_H))
     mirror = base.transpose(Image.FLIP_LEFT_RIGHT)
     print(f"基准蛙 = {base.width}x{base.height}")
 
+    # 顶边单独一张姿态（探身下望）。没有就用对半切的老办法兜底，
+    # 那种切法只剩腹部和脚，能用但看不出是蛙
+    peek = None
+    n_src = sorted(SRC_PEEK.glob("*.png")) if SRC_PEEK.is_dir() else []
+    if n_src:
+        peek = cutout(n_src[0], (PEEK_W, 0))
+        if peek.height > PEEK_MAX_H:
+            # 只留头上面一小截背，再往上都是要藏到屏幕外的
+            peek = peek.crop((0, peek.height - PEEK_MAX_H, peek.width, peek.height))
+        print(f"顶边姿态 = {peek.width}x{peek.height}  ({n_src[0].name})")
+    else:
+        print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
+
     for d in DIRS:
         cfg = SPEC[d]
-        frog = mirror if cfg["flip"] else base
-        img = place(frog, cfg["cut"], cfg["ratio"], cfg["valign"])
+        if d == "n" and peek is not None:
+            img = place_peek(peek)
+        else:
+            frog = mirror if cfg["flip"] else base
+            img = place(frog, cfg["cut"], cfg["ratio"], cfg["valign"])
         img.save(OUT / f"edge-{d}.png", "PNG")
         alpha = np.asarray(img)[:, :, 3]
         print(f"  edge-{d}.png  {img.width}x{img.height}  "
