@@ -1,6 +1,6 @@
 # 奶蛙阅读器 Interline
 
-> 贴在别的窗口上的中文电子书阅读器。半透明、置顶，能压成一条，一键就没。还养了一只奶蛙，浮在桌面上陪你念书。
+> 贴在别的窗口上的中文电子书阅读器，能压成一条、一键隐身，还有只奶蛙陪你念书。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-6.x-41cd52?style=flat-square&logo=qt&logoColor=white)
@@ -8,16 +8,6 @@
 ![License](https://img.shields.io/badge/License-MIT-8a8a8a?style=flat-square)
 
 ---
-
-## 为什么有这东西
-
-主流的阅读器都想占满屏幕：书架、翻页动画、云同步、使用统计一样不少。但我打开阅读器的场合通常很窄——等构建、等回包、等会议开始，手边十分钟，读两页，不想让人看出来。
-
-所以它只照顾这一种用法。一个不占地方的小窗口，浮在别的程序上面，透到能看见底下的代码，读完了按一下就没了。
-
-<p align="center">
-  <img src="screenshots/over-term.png" width="560" alt="浮在终端窗口上阅读">
-</p>
 
 ## 功能
 
@@ -73,7 +63,6 @@
   <img src="screenshots/pet-edge-tools.png" width="400" alt="顶部贴边形态气泡下方的五颗控制按钮">
 </p>
 
-**一些刻意的取舍：**
 - 主窗 × 只收阅读界面，**蛙留在桌面上接着念**——朗读本来就没停，把蛙一起藏掉等于声音还在人不见了。要连蛙一起消失用老板键
 - 笑声、打招呼、自言自语可以单独关；出声时朗读音量自动压到 40%，不抢拍
 - 蛙弹出不抢焦点，开着它照样能直接在主窗选中、搜索、滚正文
@@ -148,27 +137,6 @@ tts-cache/     在线音色 MP3 缓存（按 文本+音色+语速 哈希）
 想带着走就把 exe 放 U 盘，启动时加 `--portable`，数据改存 exe 同级的 `InterlineData\`。
 
 正常情况下这里不会出现日志。只有某操作在 Qt 回调里抛了异常时会多一个 `error.log`——PyQt 默认遇到这种情况会直接 `abort()`（表现就是「点一下程序就没了」），所以程序接管了异常处理，把堆栈写进这个文件并继续跑。
-
-## 代码在哪
-
-纯 Python。除 PyQt6 外两个依赖：`pdfminer.six`（PDF）、`edge-tts`（在线音色，仅当选它时才联网）。
-
-| 文件 | 负责 |
-| --- | --- |
-| `main.py` | 窗口、背景自绘、翻页渲染主流程、听书、交互、全局异常兜底 |
-| `book_parser.py` | TXT / EPUB / HTML / PDF 解析与切章 |
-| `library_view.py` | 书库卡片/列表、目录与书签面板 |
-| `settings_dialog.py` | 设置窗口（外观 / 快捷键 / 朗读 / 奶蛙 / 关于） |
-| `pet.py` | 奶蛙精灵表切帧、三层动画状态机、气泡排版与绘制 |
-| `pet_window.py` | 奶蛙悬浮窗（独立窗口、拖拽、滚轮翻句、右键菜单） |
-| `pet_audio.py` | 奶蛙音效播放器（独立于朗读的 QMediaPlayer） |
-| `pet_edge.py` | 贴边吸附：方向判定、吸附落位、相位机 |
-| `speech_controller.py` | 双引擎控制器：音色选择、失败降级、停/续状态机 |
-| `tts.py` `edge_speech.py` | 系统语音逐句朗读 / 在线音色合成与预取 |
-| `store.py` `theme.py` `assets.py` | 三 JSON 持久化 / 皮肤定义 / 打包资源解析 |
-| `hotkey.py` | Win32 全局热键注册与原生事件过滤 |
-| `make_pet_sheet.py` `make_pet_ai.py` `make_pet_edges.py` | 构建期工具：精灵表生成 / 图生图补帧 / 贴边素材与拼图 |
-| `Interline.spec` | PyInstaller 单文件打包配置 |
 
 ## 从源码跑
 
