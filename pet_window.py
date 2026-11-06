@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QPainter
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter
 from PyQt6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
 
 import pet
@@ -54,6 +54,12 @@ TOOL_FADE_MS = 130     # 淡入淡出时长
 TOOL_LEAVE_MS = 180    # 脱离窗口的宽限：系统偶发一次 leave 不该让工具条消失
 TOOL_LEFT = ("prev", "play", "next")
 TOOL_RIGHT = ("hide", "main")
+# 章节进度标：摆在左三与右二之间那条空带上，跟着工具条一起淡入淡出。
+# 无边框、比按钮矮，读起来是「一行字」而不是第六颗可点的按钮。
+PROGRESS_PX = 11           # 字号
+PROGRESS_H = 15            # 底片高度
+PROGRESS_PAD_X = 7         # 底片左右留白
+PROGRESS_GAP = 6           # 与两侧按钮组的最小间距
 TOOL_TIPS = {
     "prev": "上一句",
     "play": "开始 / 停止朗读",
@@ -80,12 +86,18 @@ class PetWindow(QWidget):
     moved = pyqtSignal(int, int)        # 拖完存位置
     notice = pyqtSignal(str)
 
-    def __init__(self, st, font_factory, speech_state):
-        """st 是共享配置；font_factory() 给气泡字体；speech_state() 给菜单文案。"""
+    def __init__(self, st, font_factory, speech_state, progress_state=None):
+        """st 是共享配置；font_factory() 给气泡字体；speech_state() 给菜单文案。
+
+        progress_state() -> (本章百分比, 第几章, 共几章) | None，由主窗给。
+        蛙自己不认识书，也不自己算进度：只在 hover 出工具条时现取一次，
+        这样滚动、翻章都不用往这边推状态（和 speech_state 一个路子）。
+        """
         super().__init__(None)
         self.st = st
         self._font_factory = font_factory
         self._speech_state = speech_state
+        self._progress_state = progress_state or (lambda: None)
 
         self.sprite = pet.PetSprite()
         self.state = pet.PetState(self.sprite)
@@ -108,6 +120,7 @@ class PetWindow(QWidget):
         self._tool_tip_at = QPoint()
         self._band = QRect()
         self._bridge = QRect()
+        self._tail = ("down", None)        # 站立形态的尾巴朝下，指向蛙头
 
         self.setWindowFlags(Qt.WindowType.Tool
                             | Qt.WindowType.FramelessWindowHint)
@@ -582,6 +595,81 @@ class PetWindow(QWidget):
                 return k
         return ""
 
+    def _progress_label(self, rects: dict) -> tuple[QRect, str]:
+        """悬停工具带上的章节进度标：返回 (底片矩形, 文案)，放不下就给空矩形。
+
+        为什么在工具带上：气泡正文是阅读区，任何常驻角标都会盖字或逼着改
+        正文换行宽度；工具带本来只在 hover 时出现，跟「鼠标指到气泡」是
+        同一个时机。八向吸附态的工具带也一律是横带，坐标不用分形态。
+        不新增窗口面积、不新增命中区、不改几何，跟着 _tools_alpha 淡入淡出。
+
+        但**中间不是空位**：站立形态下气泡尾巴（尖到 band.y()+9）占着中央
+        上半段，蛙头顶占着中央下半段——v58 把五颗按钮分列两端就是为了
+        绕开蛙头。所以先把这两段挖掉，在剩下的左右侧槽里挑最宽的那个，
+        竖直方向与按钮行居中。空间实在不够（气泡宽度拉到最小）就干脆不画，
+        宁可没有也不压尾巴或蛙脸。
+        """
+        info = self._progress_state() if self._progress_state else None
+        if not info or not rects or self._band.isEmpty():
+            return QRect(), ""
+        try:
+            pct, no, total = info
+        except (TypeError, ValueError):
+            return QRect(), ""
+        pct = max(0, min(100, int(pct)))
+        f = QFont(self._font_factory())
+        f.setPixelSize(PROGRESS_PX)
+        fm = QFontMetrics(f)
+        band = self._band
+        left = max(rects[k].right() for k in TOOL_LEFT) + PROGRESS_GAP
+        right = min(rects[k].left() for k in TOOL_RIGHT) - PROGRESS_GAP
+        if right - left < 30:
+            return QRect(), ""
+        y = band.y() + TOOL_Y_GAP + (TOOL_BTN - PROGRESS_H) // 2
+
+        forbid: list[tuple[float, float]] = []
+        _size, bubble, _frog = self._metrics()
+        # 站立形态固定朝下；吸附态只有「气泡在上、工具带在下」时尾巴才
+        # 会伸进这条带（切左右时尾巴是横的，切下边时工具带在气泡上方）。
+        tail = self._tail[0] if self._edge_dir else "down"
+        # 只有「工具带在气泡下方 + 尾巴朝下」时尾巴才会伸进这条带；
+        # 底部贴边时工具带在气泡上方，切左右时尾巴是横的，都不算。
+        if (bubble is not None and tail == "down"
+                and band.top() >= bubble.bottom() - 1):
+            cx = bubble.center().x()
+            forbid.append((cx - pet.BUBBLE_TAIL - 4,
+                           cx + pet.BUBBLE_TAIL + 4))
+        head = self._frog_rect()
+        g = self.pos()                     # _frog_rect 给的是全局坐标
+        hl, hr = head.left() - g.x(), head.right() - g.x()
+        ht, hb = head.top() - g.y(), head.bottom() - g.y()
+        if hb >= y and ht <= y + PROGRESS_H:
+            forbid.append((hl + head.width() * 0.30,
+                           hr - head.width() * 0.30))
+
+        # 把禁区从左三/右二之间那条空带里扣掉，留下可用侧槽
+        cuts = sorted((max(left, a), min(right, b)) for a, b in forbid
+                      if min(right, b) > max(left, a))
+        slots, cur = [], left
+        for a, b in cuts:
+            if a > cur:
+                slots.append((cur, a))
+            cur = max(cur, b)
+        if cur < right:
+            slots.append((cur, right))
+        slots = [s for s in slots if s[1] - s[0] >= 30]
+        if not slots:
+            return QRect(), ""
+        lo, hi = max(slots, key=lambda s: s[1] - s[0])
+        avail = hi - lo
+        # 槽宽够就带上章序，窄到只剩一格就只留百分比
+        for txt in (f"第 {no}/{total} 章 · {pct}%",
+                    f"{no}/{total} · {pct}%", f"{pct}%"):
+            w = fm.horizontalAdvance(txt) + 2 * PROGRESS_PAD_X
+            if w <= avail:
+                return QRect(round(lo + (avail - w) / 2), y, w, PROGRESS_H), txt
+        return QRect(), ""
+
     def _show_tool_tip(self) -> None:
         if self._tools_on and self._tool_hover:
             tip = TOOL_TIPS.get(self._tool_hover, "")
@@ -949,6 +1037,22 @@ class PetWindow(QWidget):
                             p, r, k, self.st,
                             hover=(k == self._tool_hover), playing=playing,
                             collapsed=collapsed)
+                    # 章节进度标：无边框、比按钮矮，别让人以为能点
+                    pr, ptxt = self._progress_label(rects)
+                    if not pr.isEmpty():
+                        bg = QColor(self.st.get("colors.bg", "#0d0f12"))
+                        bg.setAlpha(180)
+                        fg = QColor(self.st.get("colors.fg", "#c3cbd6"))
+                        fg.setAlpha(185)
+                        pf = QFont(self._font_factory())
+                        pf.setPixelSize(PROGRESS_PX)
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(bg)
+                        p.drawRoundedRect(
+                            QRectF(pr).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+                        p.setFont(pf)
+                        p.setPen(fg)
+                        p.drawText(pr, Qt.AlignmentFlag.AlignCenter, ptxt)
                     p.restore()
             finally:
                 p.end()

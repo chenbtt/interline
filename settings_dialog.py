@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
                              QListWidgetItem, QMessageBox, QPushButton, QSlider,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-import pet
 import theme
 from theme import KEY_DEFAULTS, KEY_LABELS, SKIN_NAMES, SKIN_ORDER, SKINS
 
@@ -392,31 +391,9 @@ class SettingsDialog(QDialog):
     def _page_pet(self):
         w, lay = self._page("奶蛙")
 
-        lay.addWidget(self._section("奶读模式"))
-        hint = QLabel(
-            "开启后整个阅读器变成奶蛙，头顶浮出当前这句的气泡，朗读、翻句、书签照旧。\n"
-            "点奶蛙 = 摸一下（捧腹大笑）；点气泡 = 开始/停止朗读；"
-            "滚轮 = 上/下一句；拖到哪儿就待在哪儿。", w)
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.btn_pet_try = QPushButton("进入奶读模式", w)
-        self.btn_pet_try.setObjectName("actBtn")
-        self.btn_pet_try.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_pet_try.clicked.connect(self._toggle_pet)
-        row.addWidget(self.btn_pet_try)
-        self.btn_pet_sound = QPushButton("试听笑声", w)
-        self.btn_pet_sound.setObjectName("actBtn")
-        self.btn_pet_sound.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_pet_sound.clicked.connect(self._preview_laugh)
-        row.addWidget(self.btn_pet_sound)
-        row.addStretch(1)
-        lay.addLayout(row)
-        lay.addSpacing(10)
-
+        # 这里原来有一整段「奶读模式」说明 + 进入/试听两颗按钮（v59 之前）。
+        # v49 起奶蛙是独立悬浮窗，「开启后整个阅读器变成奶蛙」已经不对，
+        # 进入也早有 F8 / 底栏蛙头 / 托盘三个入口；整段删掉，别留过期说明。
         lay.addWidget(self._section("奶蛙大小"))
         scale = int(round(float(self.st.get("pet.scale", 0.9)) * 100))
         self.pet_scale_slider = self._slider(60, 160, scale)
@@ -465,18 +442,6 @@ class SettingsDialog(QDialog):
 
         lay.addStretch(1)
         return w
-
-    def _toggle_pet(self):
-        self.reader.toggle_pet()
-        self.btn_pet_try.setText(
-            "退出奶读模式" if self.reader._pet else "进入奶读模式")
-
-    def _preview_laugh(self):
-        r = self.reader
-        if r._pet:
-            r._pet_fx(pet.JUMPING)     # 已经在奶读模式：直接摸它
-        else:
-            r.preview_pet_sound()      # 没进模式：只放声音
 
     def _on_pet_scale(self, value: int):
         self.pet_scale_label.setText(f"{value}%")
@@ -616,12 +581,6 @@ class SettingsDialog(QDialog):
                 background: #6f9fbc; border-color: #a9c8db;
                 {check_rule}
             }}
-            QPushButton#actBtn {{
-                background: rgba({ov},.08); color: {fg};
-                border: 1px solid rgba({ov},.16); border-radius: 5px;
-                padding: 6px 14px; font-size: 12.5px;
-            }}
-            QPushButton#actBtn:hover {{ border-color: rgba(95,143,168,.6); }}
         """)
         self.setWindowOpacity(1.0)
 

@@ -62,7 +62,7 @@ DEFAULT_CONFIG = {
     "bg_alpha": 236,        # 面板背景 alpha, 0-255
     "window_opacity": 1.0,  # 整体透明度, 0.15-1.0
     "one_line": {"cols": 20},
-    # 奶读模式：整个窗口变成奶蛙，头顶挂一个聊天气泡
+    # 奶读模式：奶蛙是独立悬浮窗（蛙 + 当前句气泡），主窗照常看书
     "pet": {"on": False, "scale": 0.9, "bubble_w": 360,
             "show_bubble": True, "x": None, "y": None,
             "sound": True, "sound_volume": 0.7, "duck": True,

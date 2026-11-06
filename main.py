@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 60
+BUILD_VERSION = 61
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2163,7 +2163,9 @@ class Reader(QWidget):
     def _pet_win(self) -> pet_window.PetWindow:
         """惰性建窗：不用奶读模式的人不该为它付启动开销。"""
         if self._pet_window is None:
-            w = pet_window.PetWindow(self.st, self._pet_font, self._pet_speech_label)
+            w = pet_window.PetWindow(self.st, self._pet_font,
+                                     self._pet_speech_label,
+                                     self._pet_progress)
             w.toggle_speech.connect(self._toggle_speech)
             w.bubble_clicked.connect(self._pet_bubble_clicked)
             w.step.connect(self._pet_step)
@@ -2178,6 +2180,19 @@ class Reader(QWidget):
             w.notice.connect(lambda s: self._set_hint(s, 4000))
             self._pet_window = w
         return self._pet_window
+
+    def _pet_progress(self):
+        """奶蛙悬停工具条上的本章进度：(百分比, 第几章, 共几章)，没开书给 None。
+
+        和状态栏 `_update_status` 同一个口径，别另算一套。奶读模式下正文
+        仍在滚动（_on_sentence 照常 _scroll_to_char），滚动条比例就是
+        这一章读到哪儿了；蛙只在 hover 绘制时现取，不用往它那边推状态。
+        """
+        if not self.book or not getattr(self.book, "chapters", None):
+            return None
+        sb = self.view.verticalScrollBar()
+        pct = 0 if sb.maximum() == 0 else int(sb.value() * 100 / sb.maximum())
+        return (pct, self.chapter_idx + 1, len(self.book.chapters))
 
     def _pet_speech_label(self) -> tuple[str, bool]:
         """右键菜单里那一条朗读项：文案 + 能不能点。"""
@@ -2304,10 +2319,6 @@ class Reader(QWidget):
         if not self._pet or self._pet_window is None:
             return
         self._pet_window.fx(name)
-
-    def preview_pet_sound(self):
-        """设置页的「试听笑声」：不进奶读模式也能听一耳朵。"""
-        self._pet_win().preview_sound()
 
     def _pet_play_direction(self, name: str, hold: int = 620):
         """翻句时原地跑两步，表示「往那个方向去了」。"""
@@ -2770,11 +2781,17 @@ def selftest() -> int:
             import pet_window
             need = ("start", "stop", "set_text", "fx", "suspend", "resume",
                     "unsnap", "set_scale", "relayout", "set_bubble_visible",
-                    "_toolbar", "_emit_tool", "collapse_bubble", "show_main")
+                    "_toolbar", "_emit_tool", "_progress_label",
+                    "collapse_bubble", "show_main")
             lacking = [n for n in need
                        if not hasattr(pet_window.PetWindow, n)]
             log(f"pet window= {'OK' if not lacking else 'MISSING ' + str(lacking)}")
             if lacking:
+                rc = 2
+            need_reader = ("_pet_progress",)
+            lacking_r = [n for n in need_reader if not hasattr(Reader, n)]
+            log(f"pet prog  = {'OK' if not lacking_r else 'MISSING ' + str(lacking_r)}")
+            if lacking_r:
                 rc = 2
         except Exception as e:
             log(f"pet FAIL  = {type(e).__name__}: {e}")
@@ -3509,6 +3526,185 @@ def toolcheck() -> int:
         st.set("pet.scale", 0.9)
         win.set_scale(0.9)
         win.set_bubble_visible(True)
+
+        # ---- v61：悬停气泡时，工具带上显示本章进度
+        # 只验绘制与落位；进度数值本身由主窗给，蛙不认识书。
+        # 中段不是空位：尾巴占上半、蛙头占下半，所以必须验三者都不压。
+        def head_box():
+            h = win._frog_rect()
+            g = win.pos()                # _frog_rect 给全局坐标
+            x = round(h.left() - g.x() + h.width() * 0.30)
+            return QRect(x, h.top() - g.y(),
+                         round(h.width() * 0.40), h.height())
+
+        def tail_box():
+            _sz, bub, _fr = win._metrics()
+            tail = win._tail[0] if win._edge_dir else "down"
+            if (bub is None or win._band.isEmpty() or tail != "down"
+                    or win._band.top() < bub.bottom() - 1):
+                return QRect()
+            return QRect(round(bub.center().x() - pet.BUBBLE_TAIL),
+                         win._band.top(), 2 * pet.BUBBLE_TAIL,
+                         pet.BUBBLE_TAIL)
+
+        def label_clear(lab, rr):
+            if lab.isEmpty():
+                return True              # 太窄就干脆不画，也算合规
+            return (not any(lab.intersects(r) for r in rr.values())
+                    and not lab.intersects(head_box())
+                    and not lab.intersects(tail_box())
+                    and QRect(win._band).contains(lab))
+
+        win._progress_state = lambda: (42, 3, 12)
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        rs_p, _zn_p = win._toolbar()
+        lab, ptext = win._progress_label(rs_p)
+        clear = label_clear(lab, rs_p)
+        ok = not lab.isEmpty() and "42%" in ptext and clear
+        rc |= 0 if ok else 2
+        log(f"  进度标 文案{ptext!r} 避开尾巴/蛙头/按钮 {clear} "
+            f"{'ok' if ok else '??'}")
+
+        # 真画出来：同一窗口开/关进度标，底片那块得有像素变化
+        with_img = win.grab().toImage()
+        win._progress_state = lambda: None
+        without_img = win.grab().toImage()
+        pdiff = sum(1 for y in range(lab.top(), lab.bottom() + 1)
+                    for x in range(lab.left(), lab.right() + 1)
+                    if with_img.pixel(x, y) != without_img.pixel(x, y))
+        ok = pdiff >= 30
+        rc |= 0 if ok else 2
+        log(f"  进度标真的画出来 {pdiff} 像素 {'ok' if ok else '??'}")
+
+        # 八向吸附态：工具带一样是横带，进度标也得放得下且不压任何东西
+        win._progress_state = lambda: (42, 3, 12)
+        pedge = True
+        for d, a in anchors.items():
+            win._edge_dir = ""
+            win._snap_to(d, a, animate=False, screen=mock)
+            rr, _z = win._toolbar()
+            pl, pt = win._progress_label(rr)
+            good = (not pl.isEmpty() and "42%" in pt
+                    and label_clear(pl, rr))
+            if not good:
+                hb, tb = head_box(), tail_box()
+                log(f"    {d} 文案{pt!r} 标{pl.getRect()} 带{win._band.getRect()}"
+                    f" 头{hb.getRect()} 尾{tb.getRect()}"
+                    f" 撞按钮{[k for k, r in rr.items() if pl.intersects(r)]}"
+                    f" 撞头{pl.intersects(hb)} 撞尾{pl.intersects(tb)}")
+            pedge &= good
+        rc |= 0 if pedge else 2
+        log(f"  八向吸附 进度标放得下且不压东西 {pedge} "
+            f"{'ok' if pedge else '??'}")
+
+        # 用户实际配置：260px + 0.6 倍，应该退化成只剩百分比
+        win._edge_dir = ""
+        st.set("pet.bubble_w", 260)
+        st.set("pet.scale", 0.6)
+        win.set_scale(0.6)
+        win.set_text(text)
+        rr, _z = win._toolbar()
+        pl, pt = win._progress_label(rr)
+        narrow = (not pl.isEmpty() and "%" in pt and label_clear(pl, rr))
+        rc |= 0 if narrow else 2
+        log(f"  260px×0.6 倍 退化成 {pt!r} 且不压东西 {narrow} "
+            f"{'ok' if narrow else '??'}")
+
+        # 最窄 200px：宁可不画，也不能压蛙头 / 尾巴 / 按钮
+        st.set("pet.bubble_w", 200)
+        win.set_scale(0.6)
+        win.set_text(text)
+        rr, _z = win._toolbar()
+        pl, pt = win._progress_label(rr)
+        tiny = label_clear(pl, rr)
+        rc |= 0 if tiny else 2
+        shown = repr(pt) if pt else "不画"
+        log(f"  200px 极窄 {shown} 仍不压东西 {tiny} "
+            f"{'ok' if tiny else '??'}")
+
+        # 出图：站立态点亮工具条 + 进度标，供 README 引用
+        st.set("pet.bubble_w", 360)
+        st.set("pet.scale", 0.9)
+        win.set_scale(0.9)
+        win.set_text(text)
+        win._set_tools(True)
+        win._tools_alpha = 1.0
+        pm_p = win.grab()
+        pb = QImage(pm_p.width() + 40, pm_p.height() + 40,
+                    QImage.Format.Format_RGB32)
+        pb.fill(QColor("#12161b"))
+        pp = QPainter(pb)
+        pp.drawPixmap(20, 20, pm_p)
+        pp.end()
+        pshot = here / "screenshots" / "pet-progress.png"
+        pshot = pshot if pshot.parent.is_dir() else (
+            Path(tempfile.gettempdir()) / "interline_progress.png")
+        ok = bool(pb.save(str(pshot)))
+        rc |= 0 if ok else 2
+        log(f"  进度标预览 = {pshot}" if ok else "  进度标预览 = 保存失败")
+
+        # 设置页「奶蛙」回归图：v61 把「奶读模式」说明 + 两颗按钮整段删了。
+        # 用假 Reader 抓真对话框（不 show，grab 照样能渲染），顺带断言
+        # 分组里再没有那个过期的标题。
+        try:
+            import settings_dialog as sd
+
+            class _SpeechStub:
+                edge_available = False
+
+                def voice_choices(self):
+                    return [("系统 默认", "", "sys")]
+
+                def current_voice(self):
+                    return ""
+
+                def output_devices(self):
+                    return []
+
+            class _FakeSettingsReader(QWidget):
+                def __init__(self, cfg):
+                    super().__init__()
+                    self.st = cfg
+                    self.speech = _SpeechStub()
+                    self.boss_key = "Ctrl+Alt+D"
+                    self.font_panel = None
+
+                def apply_skin(self, key): pass
+                def reload_shortcuts(self): pass
+                def pet_apply_scale(self, v): pass
+                def pet_relayout(self): pass
+                def pet_unsnap(self): pass
+
+            fake_r = _FakeSettingsReader(st)
+            sdlg = sd.SettingsDialog(fake_r)
+            sdlg.nav.setCurrentRow(3)      # 「奶蛙」页
+            sdlg.resize(660, 607)
+            sdlg.hide()
+            QApplication.processEvents()
+            labels = [w.text() for w in
+                      sdlg.pages.widget(3).findChildren(QLabel)
+                      if w.objectName() in ("section", "pageTitle")]
+            gone = "奶读模式" not in labels
+            sshot = here / "screenshots" / "settings-pet.png"
+            sshot = sshot if sshot.parent.is_dir() else (
+                Path(tempfile.gettempdir()) / "interline_settings_pet.png")
+            saved = bool(sdlg.grab().save(str(sshot), "PNG"))
+            ok = gone and saved
+            rc |= 0 if ok else 2
+            log(f"  设置页 分组{labels} 无奶读模式{gone} 出图{saved} "
+                f"{'ok' if ok else '??'}")
+            sdlg.close()
+            fake_r.deleteLater()
+        except Exception as e:
+            log(f"  设置页 FAIL {type(e).__name__}: {e}")
+            rc |= 2
+
+        # 没开书时不该冒出一个 0% 的标签
+        win._progress_state = lambda: None
+        ok = win._progress_label(win._toolbar()[0])[0].isEmpty()
+        rc |= 0 if ok else 2
+        log(f"  无书时不出进度标 {ok} {'ok' if ok else '??'}")
         log("RESULT = OK")
     except Exception as e:
         import traceback
