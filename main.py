@@ -29,6 +29,7 @@ import library_view
 import logo
 import pet
 import pet_audio
+import pet_library
 import settings_dialog
 import store
 import theme
@@ -40,7 +41,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 47
+BUILD_VERSION = 48
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -385,6 +386,8 @@ class Reader(QWidget):
         self._pet_last_ms = 0.0
         self._pet_idle_ms = 0.0
         self._pet_ducked = False
+        # 书库面板是独立窗口，不参与奶蛙窗口的尺寸计算（见 pet_library 的模块注释）
+        self._pet_panel: pet_library.PetLibraryPanel | None = None
         # 16ms 轮询（约 60Hz），真正的帧率由 PetState 按 manifest 里的 fps 决定。
         # 原来 30ms 对 8-14fps 够用，但 idle 插帧后到 16fps、跑动到 16fps，
         # 30ms 的量化误差会让个别帧多停一拍，反而看出抖
@@ -786,7 +789,10 @@ class Reader(QWidget):
         return False
 
     def _on_escape(self):
-        # Esc 退一层：奶读 → 正常阅读 → 书库/目录 → 藏窗口
+        # Esc 退一层：书库面板 → 奶读 → 正常阅读 → 书库/目录 → 藏窗口
+        if self._pet_library_open():
+            self._pet_panel.close()
+            return
         if self._pet:
             self._exit_pet()
             return
@@ -978,6 +984,9 @@ class Reader(QWidget):
         if self.font_panel is not None:
             self.font_panel.setWindowOpacity(opacity)
             self.font_panel._apply_style()
+        # 奶读书库面板同理
+        if self._pet_panel is not None:
+            self._pet_panel.apply_theme()
         if getattr(self, "search_input", None) is not None:
             self._style_search_bar()
         # 浅色皮肤要把所有「白叠加」翻成黑叠加，否则这些控件在浅底上会消失
@@ -1164,6 +1173,10 @@ class Reader(QWidget):
             self._pet_duck_end()
             if self._pet_audio is not None:
                 self._pet_audio.stop()
+            # 面板是独立窗口，不跟着藏就会孤零零飘在桌面上
+            self._pet_panel_restore = self._pet_library_open()
+            if self._pet_panel is not None:
+                self._pet_panel.hide()
         self._persist()
         self.hide()
 
@@ -1187,6 +1200,9 @@ class Reader(QWidget):
 
     def closeEvent(self, ev):
         self._persist()
+        # 面板没有父窗口，不显式关掉会留下一个无主的空窗
+        if self._pet_panel is not None:
+            self._pet_panel.close()
         if self.hotkey is not None:
             self.hotkey.unregister()
         ev.accept()
@@ -2141,6 +2157,8 @@ class Reader(QWidget):
         by = g.y() + g.height()
         self.setFixedSize(size)
         self.move(cx - size.width() // 2, by - size.height())
+        if self._pet_panel is not None:
+            self._pet_panel.follow(self.geometry())
 
     def _pet_audio_obj(self) -> pet_audio.PetAudio | None:
         if self._pet_audio is None:
@@ -2217,6 +2235,9 @@ class Reader(QWidget):
         self.st.set("pet.x", g.x())
         self.st.set("pet.y", g.y())
         self._pet = False
+        # 面板是独立窗口，退出奶读模式后必须一起关掉，否则它会自己飘在桌面上
+        if self._pet_panel is not None:
+            self._pet_panel.close()
         self._pet_timer.stop()
         self._pet_duck_end()
         if self._pet_audio is not None:
@@ -2438,6 +2459,8 @@ class Reader(QWidget):
             d["moved"] = True
         if d["moved"]:
             self.move(d["win"] + (gp - d["start"]))
+            if self._pet_panel is not None:
+                self._pet_panel.follow(self.geometry())
             dx = gp.x() - d["last_x"]
             if dx:
                 # 拖拽独占：期间忽略一切状态触发，否则会和 running 互相踩
@@ -2484,6 +2507,62 @@ class Reader(QWidget):
         self._pet_relayout()
         self.update()
 
+    # -------------------------------------------------- 书库面板
+
+    def _pet_library_open(self) -> bool:
+        return self._pet_panel is not None and self._pet_panel.isVisible()
+
+    def _pet_toggle_library(self):
+        if self._pet_library_open():
+            self._pet_panel.close()
+        else:
+            self._pet_show_library()
+
+    def _pet_show_library(self):
+        """在奶蛙旁边弹出书库。不退出奶读模式，蛙也不动。"""
+        if not self._pet:
+            return
+        if self._pet_panel is None:
+            p = pet_library.PetLibraryPanel(self.st)
+            p.open_book.connect(self._pet_open_from_library)
+            p.view().add_requested.connect(self._pet_add_file)
+            p.closed.connect(self._pet_library_closed)
+            self._pet_panel = p
+        p = self._pet_panel
+        p.sync_flags(bool(self.st.get("always_on_top", True)))
+        p.apply_theme()
+        p.show_books()
+        p.place_beside(self.geometry())
+        p.show()
+        p.raise_()
+        p.activateWindow()
+        # 焦点给面板：方向键/回车/Del 要直接作用在书列表上
+        p.view().setFocus()
+
+    def _pet_library_closed(self):
+        # 焦点必须还回奶蛙，否则滚轮翻句、Esc 都落空
+        if self._pet:
+            self.activateWindow()
+            self.setFocus()
+
+    def _pet_open_from_library(self, path: str):
+        """面板里选了一本书：留在奶读模式，换掉蛙正在念的那本。"""
+        if self._pet_panel is not None:
+            self._pet_panel.close()
+        self.open_path(path)
+        if self._pet:
+            self._pet_idx = 0
+            self._pet_refresh()
+
+    def _pet_add_file(self):
+        """面板右键「添加书籍…」：选完直接给蛙念，不用退出奶读模式。"""
+        if self._pet_panel is not None:
+            self._pet_panel.close()
+        self.pick_file()
+        if self._pet:
+            self._pet_idx = 0
+            self._pet_refresh()
+
     def _pet_menu(self, global_pos):
         menu = QMenu(self)
         show = bool(self.st.get("pet.show_bubble", True))
@@ -2503,8 +2582,9 @@ class Reader(QWidget):
         menu.addSeparator()
         menu.addAction("打开文件…").triggered.connect(
             self._pet_leave(self.pick_file))
-        menu.addAction("书库…").triggered.connect(
-            self._pet_leave(lambda: self.set_mode("books")))
+        # 书库留在奶读模式里开：蛙不消失，面板浮在它旁边
+        menu.addAction("收起书库" if self._pet_library_open() else "书库…").triggered.connect(
+            self._pet_toggle_library)
         menu.addAction("设置…").triggered.connect(
             self._pet_leave(self._open_settings))
         menu.addSeparator()
@@ -2729,6 +2809,10 @@ class Reader(QWidget):
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
+        # 面板是独立窗口，置顶开关不会自动跟过去
+        if self._pet_panel is not None:
+            self._pet_panel.sync_flags(on)
+            self._pet_panel.follow(self.geometry())
 
     # -------------------------------------------------- 显示
 
@@ -2740,6 +2824,10 @@ class Reader(QWidget):
             self._pet_last_ms = time.monotonic() * 1000.0
             if not self._pet_timer.isActive():
                 self._pet_timer.start()
+            # 老板键/托盘藏起来之前开着书库的话，回来时接着开
+            if getattr(self, "_pet_panel_restore", False):
+                self._pet_panel_restore = False
+                self._pet_show_library()
             # 刚从托盘/热键/二次启动唤起来，让奶蛙打个招呼
             self._pet_fx(pet.WAVING)
 
