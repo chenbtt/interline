@@ -14,9 +14,9 @@ from pathlib import Path
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
                           QTimer, pyqtSignal)
 from PyQt6.QtGui import (QAction, QColor, QFont, QFontInfo, QFontMetrics, QIcon,
-                         QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
-                         QShortcut, QTextBlockFormat, QTextCharFormat,
-                         QTextCursor)
+                         QImage, QKeySequence, QPainter, QPainterPath, QPen,
+                         QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat,
+                         QTextCursor, qAlpha)
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout,
                              QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
@@ -41,7 +41,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 51
+BUILD_VERSION = 52
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -2097,6 +2097,11 @@ class Reader(QWidget):
         if self._pet_window is not None:
             self._pet_window.relayout()
 
+    def pet_unsnap(self):
+        """设置里关掉贴边吸附：让蛙从边上下来，回到桌面上的位置。"""
+        if self._pet_window is not None:
+            self._pet_window.unsnap()
+
     # -------------------------------------------------- 进出
 
     def _pet_win(self) -> pet_window.PetWindow:
@@ -2572,10 +2577,28 @@ def selftest() -> int:
             if missing:
                 rc = 2
 
+            # 贴边素材：meta.json 和 24 张图少一个，吸附就整块失效
+            # （PetWindow 会静默降级成「拖到边上也不吸」，不报错）
+            edge_meta = assets.naiwa("edges/meta.json")
+            edge_ok = False
+            try:
+                em = _json.loads(edge_meta.read_text(encoding="utf-8"))
+                want = [(d, p) for d in (em.get("dirs") or {})
+                        for p in (em.get("phases") or ["base"])]
+                lack = [f"{d}-{p}" for d, p in want
+                        if not assets.naiwa(f"edges/edge-{d}-{p}.png").exists()]
+                edge_ok = bool(want) and not lack
+                log(f"pet edge  = {'OK ' + str(len(want)) + ' 张' if edge_ok else 'MISSING ' + str(lack[:4])}")
+            except Exception as e:
+                log(f"pet edge  = FAIL {type(e).__name__}: {e}")
+            if not edge_ok:
+                rc = 2
+
             # 悬浮窗是奶读模式的主力，模块没打进来要在这里就暴露。
             # 只查类和方法是否存在，不构造 QWidget（见下面 TTS 与 QPixmap 的坑）
             import pet_window
-            need = ("start", "stop", "set_text", "fx", "suspend", "resume")
+            need = ("start", "stop", "set_text", "fx", "suspend", "resume",
+                    "unsnap", "set_scale", "relayout")
             lacking = [n for n in need
                        if not hasattr(pet_window.PetWindow, n)]
             log(f"pet window= {'OK' if not lacking else 'MISSING ' + str(lacking)}")
@@ -2845,6 +2868,166 @@ def petcheck() -> int:
     return rc
 
 
+def edgecheck() -> int:
+    """打包后验证贴边吸附：方向判定、摆位、真窗口贴边截图。
+
+    和 --petcheck 一样单独跑，全程不碰 TTS：那边一建 QTextToSpeech("winrt")，
+    之后再碰 QPixmap 就是原生崩溃（0xC0000409），连日志都来不及写。
+
+    为什么要真窗口而不只算坐标：吸附的全部风险都在「切口有没有真的压在
+    屏幕边上」。坐标算对、画的时候差一像素，看坐标是看不出来的。
+    """
+    import tempfile
+
+    lines: list[str] = []
+    out = Path(tempfile.gettempdir()) / "interline_edgecheck.txt"
+    here = Path(__file__).resolve().parent
+    # 源码跑时落在 screenshots/ 供 README 引用；打包版 __file__ 在临时解包目录里，
+    # 那儿没有 screenshots/，退回临时目录（和 --petcheck 一样）
+    png = here / "screenshots" / "pet-snap.png"
+
+    def log(msg: str):
+        lines.append(str(msg))
+        try:
+            out.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 别污染真实配置：Store 在构造时就按这个变量定目录
+    os.environ.setdefault("INTERLINE_DATA_DIR",
+                          str(Path(tempfile.gettempdir()) / "interline_check"))
+
+    rc = 0
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    try:
+        import pet_edge
+        import pet_window as pw
+        import store as store_mod
+
+        st = store_mod.Store()
+        st.set("pet.snap_dir", "")      # 从「没贴过」开始，别让上次的边干扰
+        log(f"version = {BUILD_VERSION}")
+
+        # ---- 1. 纯逻辑：方向判定
+        scr = QRect(0, 0, 1280, 780)
+        fw, fh = 173, 187
+        cases = [
+            ("左上角", 10, 12, "nw"), ("上边中", 600, 8, "n"),
+            ("右上角", 1280 - fw - 6, 5, "ne"), ("左边中", 4, 400, "w"),
+            ("右边中", 1280 - fw - 3, 400, "e"), ("左下角", 8, 780 - fh - 4, "sw"),
+            ("下边中", 500, 780 - fh - 10, "s"), ("右下角", 1280 - fw - 2, 780 - fh - 2, "se"),
+            ("偏左 65px", 65, 400, ""), ("偏左 63px", 63, 400, "w"),
+            ("正中", 500, 300, ""), ("拖出屏幕左", -50, 400, "w"),
+        ]
+        for name, x, y, want in cases:
+            got = pet_edge.pick_dir(QRect(x, y, fw, fh), scr)
+            ok = got == want
+            rc |= 0 if ok else 2
+            log(f"  {name:<10} ({x:>4},{y:>3}) -> {got or '不吸':<3} "
+                f"{'ok' if ok else '?? 期望 ' + (want or '不吸')}")
+        # 多屏：右邻有屏时右边不吸
+        got = pet_edge.pick_dir(QRect(1280 - fw - 3, 400, fw, fh), scr,
+                                blocked=frozenset({"R"}))
+        ok = got != "e"
+        rc |= 0 if ok else 2
+        log(f"  {'右边是相邻屏':<10} -> {got or '不吸':<3} {'ok' if ok else '?? 不该吸'}")
+
+        # ---- 2. 真窗口：八个方向各贴一次，抓图
+        win = pw.PetWindow(st, lambda: QFont(store_mod.UI_FONT),
+                           lambda: ("开始朗读", False))
+        if not win.start("贴边自检"):
+            log("RESULT = FAIL 奶蛙素材读不出来")
+            return 2
+        win.hide()                       # 只借它的绘制，不真弹到桌面上
+        if not win.edge.ok:
+            log("RESULT = FAIL 贴边素材缺 meta.json")
+            return 2
+
+        mock = QRect(0, 0, 1280, 780)
+        size = win.edge.size()
+        anchors = {
+            "nw": QPoint(60, 60), "n": QPoint(640, 40), "ne": QPoint(1220, 60),
+            "w": QPoint(40, 400), "e": QPoint(1240, 300),
+            "sw": QPoint(60, 720), "s": QPoint(560, 740), "se": QPoint(1220, 720),
+        }
+        shots = {}
+        log(f"  画布 {size.width()}x{size.height()}，缩放 "
+            f"{win.edge.scale:.2f}")
+        for d, a in anchors.items():
+            if not win._snap_to(d, a, animate=False, screen=mock):
+                log(f"  {d:<3} 贴不上")
+                rc = 2
+                continue
+            g = win.geometry()
+            cut = win.edge.geo(d)["cut"]
+            edge = {"left": g.x() == mock.left(),
+                    "right": g.x() + g.width() - 1 == mock.right(),
+                    "top": g.y() == mock.top(),
+                    "bottom": g.y() + g.height() - 1 == mock.bottom()}[cut]
+            # 抓图后按 alpha 再验一次：像素真的压在窗口边上，不是只算了坐标
+            img = win.grab().toImage()
+            if cut in ("left", "right"):
+                col = 0 if cut == "left" else img.width() - 1
+                ink = any(qAlpha(img.pixel(col, y)) > 8 for y in range(img.height()))
+            else:
+                row = 0 if cut == "top" else img.height() - 1
+                ink = any(qAlpha(img.pixel(x, row)) > 8 for x in range(img.width()))
+            ok = edge and ink
+            rc |= 0 if ok else 2
+            log(f"  {d:<3} 窗口 ({g.x():>4},{g.y():>3}) 切口={cut:<6} "
+                f"{'齐平' if edge else '离边'}/{'有像素' if ink else '空的!'} "
+                f"{'ok' if ok else '??'}")
+            shots[d] = (win.grab(), QPoint(g.x(), g.y()))
+
+        # ---- 3. 换相位不许动窗口：抬手帧比基准宽 35px，位置一变就前功尽弃
+        base_geo = None
+        for d in ("w", "n"):
+            win._snap_to(d, anchors[d], animate=False, screen=mock)
+            g0 = win.geometry()
+            for on in (True, False):
+                win.edge_state.set_hover(on)
+                win.edge_state.tick(9999)      # 顺手把眨眼也过一遍
+            g1 = win.geometry()
+            ok = g0 == g1
+            rc |= 0 if ok else 2
+            log(f"  {d:<3} 换相位窗口 "
+                f"{'没动' if ok else f'动了 {g0} -> {g1}'} {'ok' if ok else '??'}")
+            base_geo = base_geo or g0
+
+        # ---- 4. 出图：把八只拼到一块假桌面上，供肉眼回归
+        bg = QImage(mock.size(), QImage.Format.Format_RGB32)
+        bg.fill(QColor("#12161b"))
+        p = QPainter(bg)
+        p.fillRect(QRect(200, 96, 880, 560), QColor("#0d0f12"))
+        p.setPen(QColor("#2a3038"))
+        p.drawRect(QRect(200, 96, 880, 560))
+        p.setPen(QColor("#59626f"))
+        p.drawText(QRect(200, 66, 880, 24), Qt.AlignmentFlag.AlignCenter,
+                   "贴边吸附：画布贴屏幕边的那条边就是切口")
+        for d, (pm, pos) in shots.items():
+            p.drawPixmap(pos, pm)
+            p.setPen(QColor("#7c8794"))
+            p.drawText(pos.x() + 8, pos.y() + 16, d)
+        p.end()
+        dst = png if png.parent.is_dir() else Path(tempfile.gettempdir()) / "interline_snap.png"
+        ok = bool(bg.save(str(dst)))
+        if not ok:
+            dst = Path(tempfile.gettempdir()) / "interline_snap.png"
+            ok = bool(bg.save(str(dst)))
+        log(f"render = {dst}" if ok else "render = 保存失败")
+        if not ok:
+            rc = 2
+
+        win.stop()
+        log("RESULT = " + ("OK" if rc == 0 else f"FAIL({rc})"))
+    except Exception as e:
+        import traceback
+        log(f"RESULT = FAIL {type(e).__name__}: {e}")
+        log(traceback.format_exc())
+        rc = 1
+    return rc
+
+
 def pdfcheck(path: str) -> int:
     """打包后验证 PDF 解析：cmap 数据表如果没被收进 exe，中文会解析失败。
 
@@ -2918,6 +3101,8 @@ def main():
         return selftest()
     if "--petcheck" in sys.argv:
         return petcheck()
+    if "--edgecheck" in sys.argv:
+        return edgecheck()
     if "--edgecheck" in sys.argv:
         return edgecheck()
     if "--updatecheck" in sys.argv:

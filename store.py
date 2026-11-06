@@ -66,7 +66,10 @@ DEFAULT_CONFIG = {
     "pet": {"on": False, "scale": 0.9, "bubble_w": 360,
             "show_bubble": True, "x": None, "y": None,
             "sound": True, "sound_volume": 0.7, "duck": True,
-            "idle_voice": False},
+            "idle_voice": False,
+            # 贴边吸附：拖到屏幕边附近松手就吸上去。snap_t 是沿边位置的
+            # 比例（0~1），存比例不存像素坐标，换分辨率/拔副屏都还能落回原处
+            "snap": True, "snap_dir": "", "snap_t": 0.5},
     "library": {"view": "card"},   # card | list，书库列表的展示方式
     # voice_id 形如 "sys:Microsoft Huihui Desktop" / "edge:zh-CN-XiaoxiaoNeural"
     # 空 = 系统默认语音（离线）。voice 是老版本的纯系统语音名，保留兼容。

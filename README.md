@@ -76,13 +76,22 @@
 
 **贴边形态**
 
-拖到屏幕边缘吸附时，蛙改成「斜着露出半边身体、另一半压在边缘外」的姿态，**身体不动，只眨眼和抬爪**：八向 × 三相位（`base` / `blink` / `hi`）共 24 张 256×256 透明 PNG（`assets/naiwa/edges/`），**吸附逻辑还没接**。
+拖到屏幕边缘附近松手，蛙就吸上去，改成「斜着露出半边身体、另一半压在边缘外」的姿态。八向 × 三相位（`base` / `blink` / `hi`）共 24 张 256×256 透明 PNG（`assets/naiwa/edges/`）。
 
-眨眼不进任何循环：停 2–4 秒随机，闪一帧 160 ms 就回来。抬爪是交互不是循环——鼠标指针压在蛙身上才 `hi`，移开立刻回 `base`；不自己播完就放下来。判定 hover 得按 alpha 采点，窗口是 256×256，可见像素只占 14–34%，按矩形判会「隔空招手」。
+吸附态的规则就一条：**画布贴着屏幕的那条边，就是切口所在的那条边**。所以贴边那一轴由屏幕边直接算出来，换帧、改大小、换台词都不重算位置——重算就把切口推出屏幕边了。
 
-不做呼吸是刻意的——顶边那张的呼吸动的是头，稍微给多一点就像在引体向上；侧姿态那 8px 躯干胀缩在 256px 上基本看不出来。想恢复把 `make_pet_edges.py` 里的 `BREATH` 打开，源图还在。
+- 松手时蛙可见部分离屏幕边 64px 以内才吸，四角优先于四边
+- 吸附后气泡收起、窗口变成 `256 × 奶蛙大小`，蛙滑过去（150ms，ease-out）
+- 身体不动，只眨眼（2–4 秒随机闪一帧）+ 鼠标压上来抬手；抬手时不眨眼
+- 鼠标判定按 alpha 采点，不按窗口矩形——可见像素只占一成到三成，左右贴边时半边是空的，按矩形判会「隔空招手」
+- 按住蛙身拖出来就变回站立的蛙，以可见部分的中心为锚，不跳
+- 点一下 = 播/停朗读：气泡收起了，蛙身是唯一能点的地方
+- 位置记住（存的是「贴哪条边 + 沿边走到哪」的比例，换分辨率、拔副屏都还能落回原处）
+- 多屏时相邻的那条边不吸，否则会卡在两块屏中间；设置页可以整个关掉
 
-规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)。核心约定只有一条：画布贴着屏幕的那条边就是切口，接入时不用记裁剪偏移，换帧也别动窗口位置。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（三个方向的眨眼与抬爪）。
+眨眼不进任何循环：停 2–4 秒随机，闪一帧 160 ms 就回来。不做呼吸是刻意的——顶边那张的呼吸动的是头，稍微给多一点就像在引体向上；侧姿态那 8px 躯干胀缩在 256px 上基本看不出来。想恢复把 `make_pet_edges.py` 里的 `BREATH` 打开，源图还在。
+
+规格、命名、方向映射、播放节奏都在 [`assets/naiwa/edges/SPEC.md`](assets/naiwa/edges/SPEC.md)，判定与落位在 `pet_edge.py`。预览在 `screenshots/pet-edges.png`（八向 base）、`pet-edges-context.png`（模拟桌面贴边）、`pet-edges-frames.png`（8×3 胶片条）、`pet-edges-anim.gif`（眨眼与抬爪）、`pet-snap.png`（真窗口贴八向的截图）。
 
 <p align="center">
   <img src="screenshots/pet-mode.png" width="620" alt="奶读模式：阅读器与奶蛙悬浮窗并存">
@@ -192,6 +201,7 @@ tts-cache/     在线音色的 MP3 缓存（按 文本+音色+语速 哈希）
 | `make_pet_sheet.py` | 下载奶蛙素材、切行校对、帧间插值，生成 `sheet.png` 与 `manifest.json` |
 | `make_pet_ai.py` | 构建期工具：图生图补中间帧（准备输入 / 扣底对齐 / 宽度归一化 / 镜像派生） |
 | `make_pet_edges.py` | 构建期工具：贴边素材抠图、相位剪影对齐、八向摆位裁切、拼图与场景预览 |
+| `pet_edge.py` | 贴边吸附：素材与 meta、方向判定、吸附落位、`base`/`blink`/`hi` 相位机 |
 | `Interline.spec` | PyInstaller 打包配置 |
 
 ## 从源码跑
@@ -201,6 +211,7 @@ pip install -r requirements.txt
 python main.py                 # 正常启动
 python main.py --selftest      # 检查 Qt / 解析层 / 奶蛙素材 / TTS 引擎是否可用
 python main.py --petcheck      # 奶蛙切帧与绘制冒烟，导出一张合成图
+python main.py --edgecheck     # 贴边吸附：判定用例 + 真窗口贴八向截图
 python main.py --pdfcheck a.pdf # 只跑 PDF 解析，把结果打到临时文件
 ```
 

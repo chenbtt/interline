@@ -433,12 +433,18 @@ class SettingsDialog(QDialog):
         lay.addLayout(self._slider_row(self.pet_bw_slider, self.pet_bw_label))
         lay.addSpacing(10)
 
+        lay.addWidget(self._section("贴边"))
+        self.pet_snap_cb = QCheckBox("拖到屏幕边缘松手就吸上去", w)
+        self.pet_snap_cb.setChecked(bool(self.st.get("pet.snap", True)))
+        self.pet_snap_cb.toggled.connect(self._on_pet_snap)
+        lay.addWidget(self.pet_snap_cb)
+        lay.addSpacing(10)
+
         lay.addWidget(self._section("音效"))
         self.pet_sound_cb = QCheckBox("摸奶蛙、打招呼时出声", w)
         self.pet_sound_cb.setChecked(bool(self.st.get("pet.sound", True)))
         self.pet_sound_cb.toggled.connect(self._on_pet_sound)
         lay.addWidget(self.pet_sound_cb)
-
         self.pet_duck_cb = QCheckBox("出声时把朗读音量压低，两个声音不打架", w)
         self.pet_duck_cb.setChecked(bool(self.st.get("pet.duck", True)))
         self.pet_duck_cb.toggled.connect(self._on_pet_duck)
@@ -488,6 +494,15 @@ class SettingsDialog(QDialog):
     def _on_pet_sound(self, on: bool):
         self.st.set("pet.sound", bool(on))
         self.st.save_config()
+
+    def _on_pet_snap(self, on: bool):
+        self.st.set("pet.snap", bool(on))
+        if not on:
+            # 关掉吸附的同时把「上次贴在哪」清掉：否则再打开时蛙会
+            # 直接跳回一条它现在并不在的边上
+            self.st.set("pet.snap_dir", "")
+        self.st.save_config()
+        self.reader.pet_unsnap()
 
     def _on_pet_duck(self, on: bool):
         self.st.set("pet.duck", bool(on))

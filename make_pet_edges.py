@@ -426,10 +426,12 @@ def build() -> None:
     # 同时也不能有帧被画布的左右边界切到——那是屏幕中间，切了就是莫名其妙的直边
     print()
     bad = 0
+    geo: dict[str, dict] = {}
     for d in DIRS:
         cfg = SPEC[d]
         cut = "top" if (d == "n" and peek) else cfg["cut"]
         line = []
+        boxes: dict[str, list[int]] = {}
         for phase in PHASES:
             p = OUT / f"edge-{d}-{phase}.png"
             if not p.exists():
@@ -441,7 +443,9 @@ def build() -> None:
                 line.append(f"{phase}=空")
                 bad += 1
                 continue
-            x0, y0, x1, y1 = _alpha_box(Image.open(p))
+            box = list(_alpha_box(Image.open(p)))
+            boxes[phase] = box
+            x0, y0, x1, y1 = box
             line.append(f"{phase}=({x0},{y0},{x1},{y1})")
             hit = {"left": x0 == 0, "right": x1 == CANVAS,
                    "top": y0 == 0, "bottom": y1 == CANVAS}[cut]
@@ -452,7 +456,29 @@ def build() -> None:
                 bad += 1
                 line.append(f"!{phase}被画布侧边切了")
         print(f"  edge-{d}: " + "  ".join(line))
+        if "base" in boxes:
+            # 可见盒全相位取并集：抬手帧多出来的手也要能接住鼠标
+            uni = [min(b[i] for b in boxes.values()) for i in (0, 1)]
+            uni += [max(b[i] for b in boxes.values()) for i in (2, 3)]
+            geo[d] = {"cut": cut, "base": boxes["base"], "box": uni}
     print(f"\n  切口/侧边不合格 {bad} 处")
+
+    # 运行时靠这份元数据算吸附位置和命中区：素材重出后自动对齐，
+    # 不用把包围盒抄进代码（抄错了只有肉眼看得出，而且只在边角上错几像素）。
+    # 手拼而不是 json.dumps(indent=)：包围盒是短数组，缩进展开后
+    # 一个方向就要二十行，diff 里根本看不出改了什么
+    if len(geo) == len(DIRS):
+        out = ["{", f' "canvas": {CANVAS},',
+               f' "phases": {json.dumps(list(PHASES))},', ' "dirs": {']
+        for i, d in enumerate(DIRS):
+            g = geo[d]
+            tail = "," if i < len(DIRS) - 1 else ""
+            out.append(f'  "{d}": {{"cut": "{g["cut"]}", '
+                       f'"base": {g["base"]}, "box": {g["box"]}}}{tail}')
+        out += [" }", "}", ""]
+        path = OUT / "meta.json"
+        path.write_text("\n".join(out), encoding="utf-8")
+        print(f"  元数据 = {path}（{len(geo)} 向）")
 
 
 def sheet() -> None:

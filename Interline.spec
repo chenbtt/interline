@@ -11,7 +11,19 @@ _bv = re.search(r"^BUILD_VERSION\s*=\s*(\d+)", _src, re.M).group(1)
 
 # 奶蛙素材。逐条列，不用通配：PyInstaller 的 datas 不展开 glob。
 # 运行时路径由 assets.resource_path() 按 sys._MEIPASS 解析。
+# 贴边那 24 张例外——spec 本身就是 Python，在这儿展开 glob 比手抄 24 行
+# 可靠得多：加相位不用改这里，数量对不上也直接断言失败，而不是只在
+# 打包版里表现为「图加载不出来」（源码跑一切正常，这种漏法最难发现）。
+import glob as _glob
+
 _NAIWA = "assets/naiwa"
+_EDGE_DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
+_EDGE_PHASES = ("base", "blink", "hi")
+_EDGES = sorted(_glob.glob(f"{_NAIWA}/edges/*.png"))
+assert len(_EDGES) == len(_EDGE_DIRS) * len(_EDGE_PHASES), (
+    f"贴边素材应为 {len(_EDGE_DIRS) * len(_EDGE_PHASES)} 张，"
+    f"实际 {len(_EDGES)} 张——先跑 make_pet_edges.py --build")
+
 _PET_DATAS = [
     (f"{_NAIWA}/sheet.png", _NAIWA),
     (f"{_NAIWA}/manifest.json", _NAIWA),
@@ -20,7 +32,9 @@ _PET_DATAS = [
     (f"{_NAIWA}/sfx/voice_02.mp3", f"{_NAIWA}/sfx"),
     (f"{_NAIWA}/sfx/voice_03.mp3", f"{_NAIWA}/sfx"),
     (f"{_NAIWA}/sfx/voice_04.mp3", f"{_NAIWA}/sfx"),
+    (f"{_NAIWA}/edges/meta.json", f"{_NAIWA}/edges"),
 ]
+_PET_DATAS += [(_f, f"{_NAIWA}/edges") for _f in _EDGES]
 
 # 版本资源：右键属性、任务管理器里显示的就是这里的英文名
 _VERSION_INFO = f'''# UTF-8
