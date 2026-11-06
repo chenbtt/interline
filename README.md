@@ -65,8 +65,7 @@
 - 主窗 × 只收界面，蛙继续念；要全藏用老板键
 - 笑声等音效可单独关，出声时朗读压到 40%
 - 蛙不抢焦点，开着也能在主窗操作
-- 素材低帧率，中间帧靠图生图补；口型烘进精灵表，运行时换状态不新增定时器
-- 底栏蛙头图标自绘，深浅主题换色
+- 素材低帧率，中间帧靠图生图补
 
 ### 听书
 
@@ -123,7 +122,7 @@
 
 ## 下载即用
 
-[Releases](/releases) 有现成的 `Interline.exe` 直接下；没有就自己打包，跑起来一样。单文件绿色，不写注册表 / 启动项，退出不留日志。
+[Releases](/releases) 有现成的 `Interline.exe` 直接下，双击就能用。单文件绿色，不写注册表 / 启动项，退出不留日志。
 
 数据在 `%LOCALAPPDATA%\Interline\`：
 
@@ -136,49 +135,9 @@ tts-cache/     在线音色 MP3 缓存（按 文本+音色+语速 哈希）
 
 带 U 盘走就加 `--portable`，数据存 exe 同级的 `InterlineData\`。
 
-异常时多一个 `error.log`：接管了 PyQt 的 `abort()`，把堆栈写进文件后继续运行，不会无故消失。
-
-## 从源码跑
-
-```bash
-pip install -r requirements.txt
-python main.py              # 正常启动
-python main.py --selftest   # 查 Qt / 解析层 / 奶蛙素材 / TTS 是否可用
-python main.py --petcheck   # 奶蛙切帧与绘制冒烟，导出合成图
-python main.py --edgecheck  # 贴边吸附：阈值用例 + 真窗口贴八向 + 口型落位
-python main.py --toolcheck  # 工具条：八向落位/多档缩放不重叠/悬停链/3→2 行几何不变
-python main.py --voicecheck # 在线音色链路：联网合成 → 解码 → 逐句播放
-python main.py --pdfcheck a.pdf  # 只跑 PDF 解析，结果打到临时文件
-```
-
-调试时用 `set INTERLINE_DATA_DIR=D:\tmp\interline` 把数据目录指到别处，避免污染真实配置。
-
-改奶蛙素材时 `make_pet_ai.py` 要额外装 `opencv-python` 和 `pillow`（仅构建期）。中间帧放 `assets/naiwa/mids/`；`make_pet_sheet.py` 找不到会自动退回传统插值。贴边素材规格见 `assets/naiwa/edges/SPEC.md`。
-
-## 打包
-
-```bash
-pip install pyinstaller
-python -m PyInstaller Interline.spec --noconfirm
-```
-
-产物 `dist/Interline.exe`，约 65 MB。没开 UPX（单文件包已 deflate，UPX 收益小）；spec 另剔掉 ffmpeg 后端和 `opengl32sw.dll`，省约 35 MB。
-
-奶蛙的 `sheet.png`（2.9 MB）+ 5 个 mp3 由 spec 的 `datas` 逐条打进包，加素材要手动补一行。版本号只在 `main.py` 的 `BUILD_VERSION`。
-
-## 已知限制
-
-- **仅 Windows**：老板键靠 Win32 `RegisterHotKey`，系统语音走 `winrt`
-- **在线音色是非官方接口**，可能限流或临时不可用
-- **改名或移动文件，书签会失联**（书的 id 是路径 hash）
-- **PDF 是重排文本，非原版版式**；表格、多栏、图文混排效果差，扫描件读不出字
-- **奶蛙接了 9 组动作**，精灵图里另有 16 方向注视没接
-- **没有云同步、导出、加密**
-
 ## 致谢
 
 - 奶蛙精灵图：[timerring/codex-pet-naiwa](https://github.com/timerring/codex-pet-naiwa)（MIT），中间帧由图像模型在该素材上生成，同按 MIT 使用
-- 奶蛙音效：同项目附带的语音包，仅供学习交流，**请勿商用**；发正式版请自行替换或去掉 `assets/naiwa/sfx/`
 - 在线音色：[edge-tts](https://github.com/rany2/edge-tts)（LGPL-3.0）
 
 ## License
