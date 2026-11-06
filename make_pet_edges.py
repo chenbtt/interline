@@ -1,7 +1,8 @@
 """奶蛙吸附边缘素材：构建期工具（只产美术，不含吸附逻辑）。
 
     python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图（图生图用）
-    python make_pet_edges.py --build    # 抠图 + 对齐 + 八向三相位裁切
+    python make_pet_edges.py --build    # 抠图 + 对齐 + 八向三相位裁切 + 量嘴位
+    python make_pet_edges.py --mouth    # 只补 meta.json 的嘴位，不动 24 张成品图
     python make_pet_edges.py --sheet    # 八向 base 帧 3x3 拼图
     python make_pet_edges.py --context  # 模拟桌面贴边的场景图
     python make_pet_edges.py --anim     # 胶片条 + GIF，验证动画
@@ -463,22 +464,17 @@ def build() -> None:
             geo[d] = {"cut": cut, "base": boxes["base"], "box": uni}
     print(f"\n  切口/侧边不合格 {bad} 处")
 
-    # 运行时靠这份元数据算吸附位置和命中区：素材重出后自动对齐，
-    # 不用把包围盒抄进代码（抄错了只有肉眼看得出，而且只在边角上错几像素）。
-    # 手拼而不是 json.dumps(indent=)：包围盒是短数组，缩进展开后
-    # 一个方向就要二十行，diff 里根本看不出改了什么
+    # 运行时靠这份元数据算吸附位置、命中区和嘴位：素材重出后自动对齐，
+    # 不用把包围盒或嘴坐标抄进代码（抄错了只有肉眼看得出，而且只在
+    # 边角上错几像素）。写盘交给 write_meta，--mouth 也走同一份格式。
     if len(geo) == len(DIRS):
-        out = ["{", f' "canvas": {CANVAS},',
-               f' "phases": {json.dumps(list(PHASES))},', ' "dirs": {']
-        for i, d in enumerate(DIRS):
-            g = geo[d]
-            tail = "," if i < len(DIRS) - 1 else ""
-            out.append(f'  "{d}": {{"cut": "{g["cut"]}", '
-                       f'"base": {g["base"]}, "box": {g["box"]}}}{tail}')
-        out += [" }", "}", ""]
-        path = OUT / "meta.json"
-        path.write_text("\n".join(out), encoding="utf-8")
-        print(f"  元数据 = {path}（{len(geo)} 向）")
+        for d in DIRS:
+            m = find_mouth(OUT / f"edge-{d}-base.png")
+            if m:
+                geo[d]["mouth"] = m
+            else:
+                print(f"  ！{d} 找不到嘴线，该向不会张嘴")
+        write_meta(geo)
 
 
 def sheet() -> None:
@@ -614,11 +610,85 @@ def anim() -> None:
     print(f"GIF = {gif}  ({gif.stat().st_size // 1024} KB，{len(frames)} 帧)")
 
 
+def find_mouth(path: Path) -> list[float] | None:
+    """从一张贴边成品图里量嘴线：返回 [cx, cy, 倾角]。
+
+    嘴线是暖棕色细弧（r>g>b 且色差够大）；眼睛是墨绿带白高光、肚皮是
+    浅色、身体侧面的阴影是竖长条，都进不了「细长小簇」这道过滤。
+    angle 是图像坐标（x 右、y 下）下的主轴角，QPainter.rotate 顺时针
+    为正，可以直接拿去旋转口型，不用换算。
+    """
+    import cv2
+
+    a = np.asarray(Image.open(path).convert("RGBA")).astype(np.int16)
+    r, g, b, al = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    m = ((al > 180) & (r < 205) & (r > g) & (g > b) & ((r - b) > 20))
+    n, lab, stats, cent = cv2.connectedComponentsWithStats(
+        m.astype(np.uint8), connectivity=8)
+    best = None
+    for i in range(1, n):
+        _, _, w, h, area = (int(stats[i, k]) for k in range(5))
+        if not (10 <= w <= 26 and 2 <= h <= 10 and w / h >= 1.5 and area >= 12):
+            continue
+        if best is not None and area <= best[0]:
+            continue
+        ys, xs = np.where(lab == i)
+        pts = np.column_stack([xs, ys]).astype(np.float64)
+        pts -= pts.mean(axis=0)
+        cov = pts.T @ pts / max(1, len(pts))
+        vals, vecs = np.linalg.eigh(cov)
+        v = vecs[:, int(np.argmax(vals))]
+        ang = float(np.degrees(np.arctan2(v[1], v[0])))
+        while ang >= 90:
+            ang -= 180
+        while ang < -90:
+            ang += 180
+        best = (area, round(float(cent[i][0]), 1),
+                round(float(cent[i][1]), 1), round(ang, 1))
+    return [best[1], best[2], best[3]] if best else None
+
+
+def write_meta(geo: dict) -> None:
+    """写 meta.json。一个方向一行，别用 json.dumps(indent=) 把数组展开。"""
+    out = ["{", f' "canvas": {CANVAS},',
+           f' "phases": {json.dumps(list(PHASES))},', ' "dirs": {']
+    for i, d in enumerate(DIRS):
+        g = geo[d]
+        tail = "," if i < len(DIRS) - 1 else ""
+        mouth = f', "mouth": {g["mouth"]}' if g.get("mouth") else ""
+        out.append(f'  "{d}": {{"cut": "{g["cut"]}", '
+                   f'"base": {g["base"]}, "box": {g["box"]}{mouth}}}{tail}')
+    out += [" }", "}", ""]
+    (OUT / "meta.json").write_text("\n".join(out), encoding="utf-8")
+    print(f"  元数据 = {OUT / 'meta.json'}（{len(geo)} 向）")
+
+
+def mouth_only() -> None:
+    """只补 8 向嘴位，不重出 24 张 PNG。
+
+    --build 要重跑抠图和相位对齐，源姿态是图生图产物，换个 cv2/PIL
+    版本就可能有像素级差异。只想给已有素材补嘴位时用这个，图一个字节
+    都不动。
+    """
+    meta = json.loads((OUT / "meta.json").read_text(encoding="utf-8"))
+    geo = meta.get("dirs") or {}
+    for d in DIRS:
+        m = find_mouth(OUT / f"edge-{d}-base.png")
+        if m is None:
+            print(f"  ！{d} 找不到嘴线")
+            continue
+        geo[d]["mouth"] = m
+        print(f"  {d:<3} {m}")
+    write_meta(geo)
+
+
 if __name__ == "__main__":
     if "--prep" in sys.argv:
         prep()
     elif "--build" in sys.argv:
         build()
+    elif "--mouth" in sys.argv:
+        mouth_only()
     elif "--sheet" in sys.argv:
         sheet()
     elif "--context" in sys.argv:

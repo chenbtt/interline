@@ -307,6 +307,39 @@ def draw_pet(p: QPainter, rect: QRect, pm: QPixmap) -> None:
     p.drawPixmap(x, y, pm)
 
 
+def draw_edge_mouth(p: QPainter, origin, scale: float,
+                    cx: float, cy: float, angle: float,
+                    w: float, h: float) -> None:
+    """贴边吸附态的口型：一条沿斜嘴线旋转的小深色胶囊。
+
+    cx / cy / angle 是 256 画布（未缩放）里的嘴线位置与倾角，来自
+    `edges/meta.json`，由 `make_pet_edges.py` 逐方向量好；origin 是画布
+    左上角在窗口里的位置。坐标全程按画布算，换气泡、改缩放都不会跑偏。
+
+    口腔中心沿嘴线法线（指向下巴）偏 h*0.45，让原嘴线正好落在上缘，
+    看着是「嘴张开了」而不是「嘴线变粗了」。闭口帧 h=0 不画，直接用
+    素材原本那条线。
+    """
+    import math
+
+    if h <= 0:
+        return
+    rad = math.radians(angle)
+    k = scale
+    x = origin.x() + (cx - math.sin(rad) * h * 0.45) * k
+    y = origin.y() + (cy + math.cos(rad) * h * 0.45) * k
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.translate(x, y)
+    # QPainter 顺时针为正，正好对应图像坐标（y 向下）量出来的主轴角
+    p.rotate(angle)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(62, 18, 22, 240))
+    p.drawRoundedRect(QRectF(-w * k / 2, -h * k / 2, w * k, h * k),
+                      h * k / 2, h * k / 2)
+    p.restore()
+
+
 def _wrap(fm: QFontMetrics, text: str, width: int, max_lines: int) -> list[str]:
     """按像素宽度折行，超出行数末行加省略号。
 

@@ -245,17 +245,36 @@ class EdgeAssets:
 # ---------------------------------------------------------------- 相位
 
 class EdgeState:
-    """吸附态的相位：`base` / `blink` / `hi`。
+    """吸附态的相位：`base` / `blink` / `hi`，外加朗读口型。
 
-    不进循环——眨眼是 2~4 秒随机闪一帧，抬手由鼠标决定，鼠标不走它就
-    一直抬着。这正是「挂在墙上跟人对视」该有的样子：你看着他，他也看着你。
+    相位不进循环——眨眼是 2~4 秒随机闪一帧，抬手由鼠标决定，鼠标不走
+    它就一直抬着。这正是「挂在墙上跟人对视」该有的样子。
+
+    口型是另一条独立的时间轴：朗读时按 MOUTH_CYCLE 慢慢开合，停下立刻
+    闭嘴。它不换素材图、不动窗口几何，只在画布上多画一小块，所以和
+    眨眼 / 抬手可以叠加，互不打断。
     """
+
+    # 贴边形态身体完全静止、只眨眼，口型比站立的 16fps 更克制：
+    # 12 帧 @10fps = 1.2 秒一轮，两次短开合 + 长停顿。
+    # 形状是 (宽, 高)，高 0 = 闭口，直接用素材原本那条斜嘴线。
+    # 和 make_pet_sheet.MOUTH_CYCLE 分开定义：贴边嘴只有 14px 宽、还是
+    # 斜的，照搬站立那套 24 帧只会显得碎。
+    MOUTH_FPS = 10
+    MOUTH_CYCLE = (
+        (0, 0), (0, 0),
+        (12, 2), (14, 4), (12, 2), (0, 0),
+        (0, 0), (13, 3), (15, 5), (13, 3), (0, 0), (0, 0),
+    )
 
     def __init__(self) -> None:
         self._phase = "base"
         self._hover = False
         self._gap = 0.0          # 距下次眨眼的剩余 ms
         self._blink = 0.0        # 本次眨眼剩余 ms
+        self._reading = False
+        self._mouth_ms = 0.0
+        self._mouth = (0, 0)     # 当前口型 (宽, 高)
 
     # -------------------------------------------------- 查询
 
@@ -267,6 +286,11 @@ class EdgeState:
     def hovering(self) -> bool:
         return self._hover
 
+    @property
+    def mouth_shape(self) -> tuple[int, int]:
+        """当前该画的口型；(0, 0) 表示闭口，什么都不画。"""
+        return self._mouth
+
     # -------------------------------------------------- 指令
 
     def reset(self) -> None:
@@ -274,6 +298,17 @@ class EdgeState:
         self._hover = False
         self._blink = 0.0
         self._gap = random.uniform(*BLINK_GAP_MS)
+        self._mouth = (0, 0)
+        self._mouth_ms = 0.0
+        # _reading 故意不清：吸上去 / 摘下来都会 reset，主窗那会儿不会
+        # 再同步一次 base，清了嘴就再也不动了
+
+    def set_reading(self, on: bool) -> None:
+        """由主窗的 base 状态驱动；停下立即闭嘴。"""
+        self._reading = bool(on)
+        if not on:
+            self._mouth = (0, 0)
+            self._mouth_ms = 0.0
 
     def set_hover(self, on: bool) -> bool:
         """鼠标进/出蛙身，返回要不要重绘。"""
@@ -292,23 +327,44 @@ class EdgeState:
         return False
 
     def tick(self, dt_ms: float) -> bool:
+        """推进相位与口型，返回要不要重绘。
+
+        口型先算：原来的 tick 在「正在眨眼」和「抬手中」两处提前返回，
+        直接挂在末尾的话那两段里嘴会卡住不动。
+        """
+        dirty = self._tick_mouth(dt_ms)
         if self._blink > 0:
             self._blink -= dt_ms
             if self._blink > 0:
-                return False
+                return dirty
             self._blink = 0.0
             # 眨眼结束时鼠标还压在上面就直接抬手，别再闪一帧 base
-            return self._switch("hi" if self._hover else "base")
+            return self._switch("hi" if self._hover else "base") or dirty
 
         if self._phase == "hi":
-            return False
+            return dirty
 
         self._gap -= dt_ms
         if self._gap > 0:
-            return False
+            return dirty
         self._gap = random.uniform(*BLINK_GAP_MS)
         self._blink = BLINK_MS
-        return self._switch("blink")
+        return self._switch("blink") or dirty
+
+    def _tick_mouth(self, dt_ms: float) -> bool:
+        if not self._reading:
+            if self._mouth == (0, 0):
+                return False
+            self._mouth = (0, 0)
+            self._mouth_ms = 0.0
+            return True
+        self._mouth_ms += dt_ms
+        step = 1000.0 / self.MOUTH_FPS
+        shape = self.MOUTH_CYCLE[int(self._mouth_ms / step) % len(self.MOUTH_CYCLE)]
+        if shape == self._mouth:
+            return False
+        self._mouth = shape
+        return True
 
     # -------------------------------------------------- 内部
 

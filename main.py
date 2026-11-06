@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 56
+BUILD_VERSION = 57
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2664,8 +2664,18 @@ def selftest() -> int:
                         for p in (em.get("phases") or ["base"])]
                 lack = [f"{d}-{p}" for d, p in want
                         if not assets.naiwa(f"edges/edge-{d}-{p}.png").exists()]
+                dirs = em.get("dirs") or {}
+                with_mouth = [d for d, g in dirs.items()
+                              if len(g.get("mouth") or []) == 3]
                 edge_ok = bool(want) and not lack
                 log(f"pet edge  = {'OK ' + str(len(want)) + ' 张' if edge_ok else 'MISSING ' + str(lack[:4])}")
+                # 少一个方向的嘴位，那一向会一直闭着嘴，不报错也看不出
+                # 为什么——在这里直接卡住
+                ok_mouth = len(dirs) == 8 and len(with_mouth) == 8
+                log(f"pet mouth = 贴边 {len(with_mouth)}/{len(dirs)} 向有嘴位 "
+                    f"{'OK' if ok_mouth else 'FAIL'}")
+                if not ok_mouth:
+                    rc = 2
             except Exception as e:
                 log(f"pet edge  = FAIL {type(e).__name__}: {e}")
             if not edge_ok:
@@ -3108,6 +3118,128 @@ def edgecheck() -> int:
             log(f"  {d:<3} 换相位窗口 "
                 f"{'没动' if ok else f'动了 {g0} -> {g1}'} {'ok' if ok else '??'}")
             base_geo = base_geo or g0
+
+        # ---- 3.5 朗读口型：嘴位齐、时钟会开合、真画上去不改几何
+        import pet as pet_mod
+
+        mouths = {}
+        for d in anchors:
+            m = (win.edge.geo(d) or {}).get("mouth")
+            ok = bool(m) and len(m) == 3 and 0 <= m[0] <= win.edge.canvas()
+            mouths[d] = m
+            rc |= 0 if ok else 2
+            log(f"  嘴位 {d:<3} {m} {'ok' if ok else '??'}")
+
+        es = pet_edge.EdgeState()
+        es.set_reading(True)
+        seen = set()
+        for _ in range(24):
+            es.tick(100)
+            seen.add(es.mouth_shape)
+        es.reset()                       # 吸附换边会 reset，朗读状态不能丢
+        kept = es._reading
+        es.set_reading(False)
+        closed = es.mouth_shape == (0, 0)
+        ok = len(seen) >= 4 and kept and closed
+        rc |= 0 if ok else 2
+        log(f"  口型时钟 {len(seen)} 种形状 / reset 保留朗读 {kept} / "
+            f"停下闭嘴 {closed} {'ok' if ok else '??'}")
+
+        # 张嘴时再验一次：窗口几何一像素都不该动，且口型必须真的画在
+        # 「画布坐标 + 画布偏移」× scale 算出来的那个位置。v53 在这套
+        # 坐标系上栽过，光看窗口没动不够
+        win._snap_to("e", anchors["e"], animate=False, screen=mock)
+        g0 = win.geometry()
+        _sz, _bub, cv = win._metrics()
+        win.edge_state.set_reading(True)
+        win.edge_state._mouth = (0, 0)
+        shut = win.grab().toImage()
+        win.edge_state._mouth = (14, 5)
+        spoken = win.grab().toImage()
+        ok = g0 == win.geometry()
+        rc |= 0 if ok else 2
+        log(f"  张嘴后窗口 {'没动' if ok else '动了'} {'ok' if ok else '??'}")
+
+        m = mouths["e"]
+        k = win.edge.scale
+        px = round(cv.left() + m[0] * k)
+        py = round(cv.top() + m[1] * k)
+        diff = 0
+        for dy in range(-4, 7):
+            for dx in range(-10, 11):
+                x, y = px + dx, py + dy
+                if (0 <= x < shut.width() and 0 <= y < shut.height()
+                        and qAlpha(shut.pixel(x, y)) > 8
+                        and shut.pixel(x, y) != spoken.pixel(x, y)):
+                    diff += 1
+        ok = diff >= 8
+        rc |= 0 if ok else 2
+        log(f"  真窗口张嘴 嘴部变化 {diff} 像素 {'ok' if ok else '??'}")
+
+        # 口型预览：每方向闭口 / 张口并排，走的就是运行时那个绘制函数。
+        # 格子和缩放必须跟运行时一致——素材图是 256*k 的，嘴位也要乘 k；
+        # 早先图按 256 的格子摆、嘴按 1.0 画，缩放 0.9 时口型会整体
+        # 偏到嘴线下方十几像素，看着像掉出脸外（实际运行窗口没这问题）。
+        k = win.edge.scale
+        c = win.edge.size().width()          # = round(canvas * k)
+        board = QImage(c * 4, c * 4, QImage.Format.Format_ARGB32)
+        board.fill(QColor("#12161b"))
+        bp = QPainter(board)
+        for i, d in enumerate(("n", "ne", "e", "se", "s", "sw", "w", "nw")):
+            row, col = divmod(i, 2)
+            ox, oy = col * c * 2, row * c
+            pm = win.edge.pixmap(d, "base")
+            if pm is None or pm.isNull():
+                continue
+            bp.drawPixmap(ox, oy, pm)
+            bp.drawPixmap(ox + c, oy, pm)
+            m = mouths.get(d)
+            if m:
+                pet_mod.draw_edge_mouth(bp, QPoint(ox + c, oy), k,
+                                        m[0], m[1], m[2], 14, 4)
+        bp.end()
+
+        # 回归护栏：光「嘴部有像素变化」不够，得验变化确实落在嘴线上。
+        # 预览早先把素材按 0.9 画、嘴按 1.0 画，窗口几何和像素差断言
+        # 全过，肉眼一看深色块掉到脸外。这里直接比对闭口/张口两格的
+        # 差异质心和预期嘴位，缩放再改也能当场抓出来。
+        import math as _math
+
+        placed = 0
+        for i, d in enumerate(("n", "ne", "e", "se", "s", "sw", "w", "nw")):
+            row, col = divmod(i, 2)
+            ox, oy = col * c * 2, row * c
+            m = mouths.get(d)
+            if not m:
+                continue
+            rad = _math.radians(m[2])
+            ex = (m[0] - _math.sin(rad) * 4 * 0.45) * k
+            ey = (m[1] + _math.cos(rad) * 4 * 0.45) * k
+            n, sx, sy = 0, 0, 0
+            for yy in range(max(0, round(ey) - 18), min(c, round(ey) + 19)):
+                for xx in range(max(0, round(ex) - 20), min(c, round(ex) + 21)):
+                    if (board.pixel(ox + xx, oy + yy)
+                            != board.pixel(ox + c + xx, oy + yy)):
+                        n += 1
+                        sx += xx
+                        sy += yy
+            dx = sx / n - ex if n else 999
+            dy = sy / n - ey if n else 999
+            hit = n >= 20 and abs(dx) <= 6 and abs(dy) <= 6
+            placed += bool(hit)
+            log(f"  口型落位 {d:<3} 差 {n:3d} 像素 "
+                f"偏移 ({dx:+.1f},{dy:+.1f}) {'ok' if hit else '??'}")
+        ok = placed == 8
+        rc |= 0 if ok else 2
+        log(f"  口型落位 {placed}/8 向贴在嘴线上 {'ok' if ok else '??'}")
+
+        m_png = here / "screenshots" / "pet-edge-reading.png"
+        dm = (m_png if m_png.parent.is_dir()
+              else Path(tempfile.gettempdir()) / "interline_edge_mouth.png")
+        ok = bool(board.save(str(dm)))
+        log(f"  口型预览 = {dm}" if ok else "  口型预览 = 保存失败")
+        if not ok:
+            rc = 2
 
         # ---- 4. 出图：把八只拼到一块假桌面上，供肉眼回归
         bg = QImage(mock.size(), QImage.Format.Format_RGB32)

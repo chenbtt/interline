@@ -466,6 +466,9 @@ class PetWindow(QWidget):
 
     def set_base(self, name: str):
         self.state.set_base(name)
+        # 吸附态不推进站立动画，朗读开关得单独告诉相位状态机：
+        # 它自己按 10fps 推口型，停下立刻闭嘴
+        self.edge_state.set_reading(name == pet.READING)
         self.update()
 
     def fx(self, name: str):
@@ -652,6 +655,15 @@ class PetWindow(QWidget):
                     pm = self.edge.pixmap(self._edge_dir, self.edge_state.phase)
                     if pm is not None and not pm.isNull():
                         p.drawPixmap(box.topLeft(), pm)
+                    # 口型画在画布坐标系里，跟素材图同一个 origin / scale。
+                    # 嘴位由 meta.json 给；闭口时 mouth_shape 是 (0,0)，
+                    # 什么都不画，直接用素材原本那条斜嘴线
+                    mw, mh = self.edge_state.mouth_shape
+                    geo = self.edge.geo(self._edge_dir) or {}
+                    m = geo.get("mouth")
+                    if mh > 0 and m and len(m) >= 3:
+                        pet.draw_edge_mouth(p, box.topLeft(), self.edge.scale,
+                                            m[0], m[1], m[2], mw, mh)
                     if bubble is not None and self._text:
                         tail, anchor = self._tail
                         pet.draw_bubble(p, bubble, self._font_factory(),
