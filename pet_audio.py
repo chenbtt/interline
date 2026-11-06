@@ -9,7 +9,7 @@ import random
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
 import assets
@@ -19,6 +19,9 @@ VOICES = ("voice_01.mp3", "voice_02.mp3", "voice_03.mp3", "voice_04.mp3")
 
 # 读不到时长时的兜底，别让动画 hold 变成 0
 FALLBACK_MS = 1500
+
+# 预热放多久就掐：够把端点唤醒即可，长了只是白占播放器
+WARM_MS = 160
 
 
 class PetAudio(QObject):
@@ -42,9 +45,14 @@ class PetAudio(QObject):
         self._device_desc: str | None = None
         self._bad: set[str] = set()          # 解不出来的，别再试第二遍
         self._warned = False
+        self._warming = False
+        self._warmed = False
         self._load_manifest()
 
         self._player.errorOccurred.connect(self._on_error)
+        # 设备必须在构造时就定好。留在 play() 里首次调用等于现建一次音频 sink，
+        # 环回录音实测：首播 132ms 才出声，后续只要 93ms —— 差的就是被吞掉的开头
+        self.set_output_device(self.st.get("tts.output_device", ""))
 
     # -------------------------------------------------- 元数据
 
@@ -93,6 +101,49 @@ class PetAudio(QObject):
 
     # -------------------------------------------------- 播放
 
+    def warm(self) -> bool:
+        """把音频链路提前叫醒，返回是否真的预热了一次。
+
+        首次 play 要现走一遍端点初始化（蓝牙/眼镜这类设备还得等链路唤醒），
+        这段延迟里写进去的样本是听不到的。用静音放一小小段把这步做掉，
+        真正要出声的时候链路已经热了。
+
+        静音用 muted + volume 0 双保险：单靠 0 音量在某些设备上只是衰减，
+        真漏出来就是「没点它自己叫了一声」。
+        """
+        if self._warmed or not self.st.get("pet.sound", True):
+            return False
+        path = assets.naiwa("sfx/voice_01.mp3")
+        if not Path(path).exists():
+            return False
+
+        self._warmed = True
+        self._warming = True
+        try:
+            self.set_output_device(self.st.get("tts.output_device", ""))
+            self._out.setVolume(0.0)
+            self._out.setMuted(True)
+            self._player.stop()
+            self._player.setSource(QUrl.fromLocalFile(str(path)))
+            self._player.play()
+            QTimer.singleShot(WARM_MS, self._warm_done)
+            return True
+        except Exception:
+            self._warm_done()
+            return False
+
+    def _warm_done(self) -> None:
+        """预热收尾。期间有真声来了就别掐了，那会是「笑到一半被腰斩」。"""
+        if not self._warming:
+            return
+        self._warming = False
+        try:
+            self._player.stop()
+            self._out.setMuted(False)
+            self._out.setVolume(self.volume())
+        except Exception:
+            pass
+
     def play(self, clip: str, cooldown_ms: int = 0) -> bool:
         """放一条音效。返回是否真的出声。"""
         if not self.st.get("pet.sound", True):
@@ -109,9 +160,15 @@ class PetAudio(QObject):
         if cooldown_ms and now - self._last_play.get(clip, -1e9) < cooldown_ms:
             return False        # 冷却中：动画照播，但别再响一遍
 
+        # 真声先到：预热作废，别让 _warm_done 把这一条掐断
+        if self._warming:
+            self._warming = False
+            self._out.setMuted(False)
+
         self.set_output_device(self.st.get("tts.output_device", ""))
         self._out.setVolume(self.volume())
         self._last_play[clip] = now
+        self._warmed = True
 
         # 单实例：先掐掉上一条，天然不会叠加
         self._player.stop()

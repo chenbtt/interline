@@ -31,6 +31,7 @@ import pet_audio
 DRAG_SLOP = 4          # 按下后移动超过这么远才算拖拽，否则当点击
 BUBBLE_PAD = 2         # 气泡尾巴尖到蛙头的空隙（尾巴本身另算）
 SCREEN_INSET = 40      # 首次出现时离屏幕右下角的距离
+GREET_DELAY_MS = 200   # 出现后隔多久打招呼（让首帧和音频链路先就位）
 
 
 class PetWindow(QWidget):
@@ -73,6 +74,11 @@ class PetWindow(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
+        # 打招呼用挂在自己身上的单发定时器：静态 singleShot 在窗口先被销毁时
+        # 还会回来敲一次门，对着已析构的 C++ 对象调方法就是 RuntimeError
+        self._greet_timer = QTimer(self)
+        self._greet_timer.setSingleShot(True)
+        self._greet_timer.timeout.connect(self._greet)
 
     # -------------------------------------------------- 生命周期
 
@@ -89,11 +95,21 @@ class PetWindow(QWidget):
         self._last_ms = time.monotonic() * 1000.0
         self._idle_ms = 0.0
         self._timer.start()
-        self.fx(pet.WAVING)
+        # 第一声别急：窗口还在画首帧，音频链路也是冷的。
+        # 先静音预热，200ms 后再打招呼——实测不这么做首条音效会被切掉开头
+        audio = self._audio_obj()
+        if audio is not None:
+            audio.warm()
+        self._greet_timer.start(GREET_DELAY_MS)
         return True
+
+    def _greet(self):
+        if self.isVisible():
+            self.fx(pet.WAVING)
 
     def stop(self):
         self._timer.stop()
+        self._greet_timer.stop()
         if self._audio is not None:
             self._audio.stop()
         self.state.reset()
@@ -167,7 +183,12 @@ class PetWindow(QWidget):
 
     def preview_sound(self):
         audio = self._audio_obj()
-        if audio is not None:
+        if audio is None:
+            return
+        # 试听往往就是这条链路的第一次发声，同样要先热一下再放
+        if audio.warm():
+            QTimer.singleShot(220, lambda: audio.play(pet_audio.LAUGH))
+        else:
             audio.play(pet_audio.LAUGH)
 
     def apply_theme(self):

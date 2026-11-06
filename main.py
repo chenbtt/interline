@@ -40,7 +40,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 49
+BUILD_VERSION = 50
 SERVER_KEY = "Interline.SingleInstance.v1"
 HEADER_H = 36
 RESIZE_MARGIN = 14
@@ -587,7 +587,7 @@ class Reader(QWidget):
         self.btn_lib.clicked.connect(lambda: self.set_mode("books"))
         self.btn_add.clicked.connect(self.add_books)
         self.btn_back.clicked.connect(lambda: self.set_mode("read"))
-        self.btn_close.clicked.connect(self._hide_window)
+        self.btn_close.clicked.connect(lambda: self._hide_window())
         self.view.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self.view.customContextMenuRequested.connect(self._show_view_menu)
         self.request_show.connect(self._do_show)
@@ -1123,11 +1123,16 @@ class Reader(QWidget):
         self._flush_progress()
         self._save_geometry()
 
-    def _hide_window(self):
+    def _hide_window(self, hide_pet: bool = False):
+        """把主窗收起来。
+
+        hide_pet 只给老板键用：那是「一键全消失」，蛙也得跟着躲。
+        点主窗的 × 只是收阅读界面，蛙该继续留在桌面上念——朗读本来就没停，
+        把蛙一起藏掉等于声音还在、人不见了。
+        """
         if self.font_panel is not None:
             self.font_panel.hide()
-        if self._pet and self._pet_window is not None:
-            # 悬浮窗不跟着藏就会孤零零留在桌面上，声音也停不下来
+        if self._pet and self._pet_window is not None and hide_pet:
             self._pet_window.suspend()
             self._pet_duck_end()
         self._persist()
@@ -1142,7 +1147,7 @@ class Reader(QWidget):
             if self.speech.running and not self.speech.paused:
                 self.speech.pause()
                 self._boss_paused = True
-            self._hide_window()
+            self._hide_window(hide_pet=True)
         else:
             self._do_show()
             self.raise_()
