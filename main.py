@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 64
+BUILD_VERSION = 65
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -414,6 +414,9 @@ class Reader(QWidget):
         self._pet_text = ""
         self._pet_idx = 0
         self._pet_ducked = False
+        # 朗读动画有两套（呼吸+口型 / 微笑吐舌），每次开始朗读随机挑一套，
+        # 暂停续读、换句、翻章都不重选 —— 否则念着念着蛙会突然换一身
+        self._pet_pick = pet.ReadingPicker()
         # 笑声盖住朗读时把朗读压低，播完恢复；退出模式时也必须恢复
         self._pet_duck_timer = QTimer(self)
         self._pet_duck_timer.setSingleShot(True)
@@ -1719,7 +1722,9 @@ class Reader(QWidget):
         cur.clearSelection()
         cur.setPosition(pos)
         self.view.setTextCursor(cur)
+        self._pet_pick.new_session()        # 选段朗读算新的一轮，重新挑动画
         self._start_speech(idx)
+
 
     def _clear_selection(self) -> None:
         cur = self.view.textCursor()
@@ -1751,8 +1756,12 @@ class Reader(QWidget):
                 self.speech.rebuild()
                 self._start_speech(self._speech_pos, self._speech_char)
             else:
+                # 新起一轮才算换装。「续」分支不动 —— 续读、换句、翻章、
+                # 老板键回来都只是同一轮里的挪动，重选会显得蛙在抽风
+                self._pet_pick.new_session()
                 self._start_speech()
             self._speech_paused = False
+
 
     def _start_speech(self, from_idx: int | None = None, from_char: int = 0):
         if not self.book or not self._tts_sentences:
@@ -2278,7 +2287,10 @@ class Reader(QWidget):
             # 安静的 idle 呼吸。原来常驻的是 row8 那套「抬手→放下→抱臂」
             # 循环，20fps 一直在比划，读着书旁边有个东西不停动，看着很赶。
             # 小动作改成隔一阵子随机来一个（见 _pet_ambient）
-            name = pet.READING
+            # 两套朗读动画（呼吸口型 / 微笑吐舌）由 _pet_pick 在每次开始
+            # 朗读时定下，这里只取当前那套
+            name = self._pet_pick.current()
+
         elif self.speech.paused or self._speech_paused:
             # 停了（手动按「停」或被老板键按下）：抬手托腮，播一次就停在
             # 那个姿势上等用户回来
@@ -2716,13 +2728,79 @@ def selftest() -> int:
             if not (anims and meta.get("frame_w")):
                 rc = 2
 
+            fw = int(meta.get("frame_w", 0))
+            fh = int(meta.get("frame_h", 0))
+            rd, idl = anims.get("reading") or {}, anims.get("idle") or {}
+
+            # 两套朗读动画都得在表里。漏一套的话 PetSprite._info 会静默
+            # 回落到 idle —— 不报错，只是随机到它时蛙站着发呆、嘴不动
+            import pet as pet_mod
+            lack_anim = [n for n in pet_mod.ALL_ANIMS if n not in anims]
+            log(f"pet names = {len(pet_mod.ALL_ANIMS)} 个必备动画 "
+                f"{'OK' if not lack_anim else 'MISSING ' + str(lack_anim)}")
+            if lack_anim:
+                rc = 2
+
+            # 第二套朗读动画（微笑吐舌）是图生图逐帧出的单独一条，不进源表。
+            # 行号必须跟 reading 不同，否则两套其实是同一行在播
+            rd2 = anims.get(pet_mod.TONGUE) or {}
+            ok_r2 = (int(rd2.get("frames") or 0) >= 6
+                     and bool(rd2.get("loop"))
+                     and not rd2.get("mouth")
+                     and rd2.get("row") is not None
+                     and rd2.get("row") != rd.get("row"))
+            log(f"pet read2 = {rd2.get('frames')} 帧 {rd2.get('fps')}fps "
+                f"row {rd2.get('row')} {'OK' if ok_r2 else 'FAIL'}")
+            if not ok_r2:
+                rc = 2
+
+            if idl and rd2 and fw and fh:
+                def alpha_box(ax: int, ay: int) -> tuple:
+                    """一格的可见包围盒（右下开区间）。40k 个像素也就几十毫秒。"""
+                    x0, y0, x1, y1 = 10 ** 6, 10 ** 6, -1, -1
+                    for y in range(fh):
+                        py = ay + y
+                        for x in range(fw):
+                            if (img.pixel(ax + x, py) >> 24) & 0xFF > 8:
+                                if x < x0:
+                                    x0 = x
+                                if x > x1:
+                                    x1 = x
+                                if y < y0:
+                                    y0 = y
+                                if y > y1:
+                                    y1 = y
+                    return (x0, y0, x1 + 1, y1 + 1) if x1 >= 0 else (0, 0, 0, 0)
+
+                irow, trow = int(idl["row"]), int(rd2["row"])
+                ib, tb = alpha_box(0, irow * fh), alpha_box(0, trow * fh)
+                dh = abs(tb[3] - ib[3])
+                ratio = (tb[3] - tb[1]) / max(1, ib[3] - ib[1])
+                dc = abs((tb[0] + tb[2]) / 2 - (ib[0] + ib[2]) / 2)
+                # 隔 4 像素抽样比一遍：两套是不同画，不抽样比全图太慢
+                diff = sum(1 for y in range(0, fh, 4) for x in range(0, fw, 4)
+                           if img.pixel(x, trow * fh + y) != img.pixel(x, irow * fh + y))
+                ok_size = (dh <= 3 and 0.96 <= ratio <= 1.04 and dc <= 4 and diff > 200)
+                log(f"pet 体量  = 吐舌 vs idle 底边差 {dh}px / 高比 {ratio:.3f} / "
+                    f"中心差 {dc:.1f}px / 抽样差 {diff} 点 "
+                    f"{'OK' if ok_size else 'FAIL'}")
+                if not ok_size:
+                    rc = 2
+
+            # 随机选套：两套都得能抽到，且一次会话内不能变
+            pk = pet_mod.ReadingPicker()
+            seen = {pk.new_session() for _ in range(200)}
+            stable = len({pk.current() for _ in range(50)}) == 1
+            ok_pick = seen == set(pet_mod.READING_STATES) and stable
+            log(f"pet pick  = 抽到 {sorted(seen)} / 会话内稳定 {stable} "
+                f"{'OK' if ok_pick else 'FAIL'}")
+            if not ok_pick:
+                rc = 2
+
             # reading 的口型是构建期画进精灵表的，不是运行时叠的图层。
             # 直接比像素：张口帧必须和 idle 同列不同，闭口帧必须完全相同。
             # 这样万一以后重跑 make_pet_sheet.py 漏了口型，自检会当场发现。
-            rd, idl = anims.get("reading") or {}, anims.get("idle") or {}
             if rd.get("mouth") and idl:
-                fw = int(meta.get("frame_w", 0))
-                fh = int(meta.get("frame_h", 0))
                 ri, rr = int(idl.get("row", 0)), int(rd.get("row", -1))
 
                 def mouth_diff(col: int, src: int) -> int:
@@ -3021,11 +3099,7 @@ def petcheck() -> int:
             log("RESULT    = FAIL 精灵表读不出来")
             return 2
         log(f"frame     = {sp.size().width()}x{sp.size().height()}")
-        for name in (pet_mod.IDLE, pet_mod.READING, pet_mod.RUNNING,
-                     pet_mod.THINKING, pet_mod.WAITING,
-                     pet_mod.WAVING, pet_mod.JUMPING,
-                     pet_mod.FAILED, pet_mod.REVIEW, pet_mod.RUN_LEFT,
-                     pet_mod.RUN_RIGHT):
+        for name in pet_mod.ALL_ANIMS:
             fr = sp.frames(name)
             log(f"  {name:<14} {len(fr):>2} 帧 {sp.fps(name):>2}fps "
                 f"{'loop' if sp.loops(name) else 'once'}")
@@ -3041,13 +3115,66 @@ def petcheck() -> int:
         pst.play(pet_mod.WAITING, 500)
         pst.tick(600)                       # hold 到期，回到 base
         back = pst.current == pet_mod.READING
+        # 第二套朗读动画也得能当 base 用：不在 BASE_STATES 里会被静默降级成
+        # idle，症状是「随机到它时蛙站着不动、嘴也不张」，日志里一句话都没有
+        pst.set_base(pet_mod.TONGUE)
+        pst.tick(400)
+        at_tongue = pst.current == pet_mod.TONGUE
         pst.set_base(pet_mod.THINKING)
         pst.tick(400)
         at_pause = (pst.current == pet_mod.THINKING
                     and not sp.loops(pet_mod.THINKING))
-        log(f"state     = 朗读 {at_read} / 小动作后回落 {back} / 停下托腮 {at_pause}")
-        if not (at_read and back and at_pause):
+        log(f"state     = 朗读 {at_read} / 小动作后回落 {back} / "
+            f"吐舌 {at_tongue} / 停下托腮 {at_pause}")
+        if not (at_read and back and at_tongue and at_pause):
             rc = 2
+
+        # 两套朗读动画的体量：吐舌是图生图出来的另一条素材，构建期按高度
+        # 归一过，这里量一遍，确认没跑偏（底边/高度/水平中心）
+        def qbox(im) -> tuple:
+            x0, y0, x1, y1 = 10 ** 6, 10 ** 6, -1, -1
+            for y in range(im.height()):
+                for x in range(im.width()):
+                    if (im.pixel(x, y) >> 24) & 0xFF > 8:
+                        if x < x0:
+                            x0 = x
+                        if x > x1:
+                            x1 = x
+                        if y < y0:
+                            y0 = y
+                        if y > y1:
+                            y1 = y
+            return (x0, y0, x1 + 1, y1 + 1) if x1 >= 0 else (0, 0, 0, 0)
+
+        ib = qbox(sp.frames(pet_mod.IDLE)[0].toImage())
+        tb = qbox(sp.frames(pet_mod.TONGUE)[0].toImage())
+        dh = abs(tb[3] - ib[3])
+        ratio = (tb[3] - tb[1]) / max(1, ib[3] - ib[1])
+        dc = abs((tb[0] + tb[2]) / 2 - (ib[0] + ib[2]) / 2)
+        ok_size = dh <= 3 and 0.96 <= ratio <= 1.04 and dc <= 4
+        log(f"size      = 吐舌 vs idle 底边差 {dh}px / 高比 {ratio:.3f} / "
+            f"中心差 {dc:.1f}px {'OK' if ok_size else 'FAIL'}")
+        if not ok_size:
+            rc = 2
+
+        # 两套并排一张：肉眼确认是一路人（配色、轮廓粗细、受光方向）
+        png2 = Path(tempfile.gettempdir()) / "interline_petcheck-2sets.png"
+        fsz = sp.size()
+        sets = QPixmap(fsz.width() * 2 + 48, fsz.height() + 24)
+        sets.fill(QColor("#161a1f"))
+        p = QPainter(sets)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for i, nm in enumerate(pet_mod.READING_STATES):
+            fr = sp.frames(nm)
+            if fr:
+                p.drawPixmap(16 + i * (fsz.width() + 16), 12,
+                             fr[min(2, len(fr) - 1)])
+        p.end()
+        if not sets.save(str(png2), "PNG"):
+            log("sets      = 保存失败")
+            rc = 2
+        else:
+            log(f"sets      = 两套朗读动画并排 -> {png2}")
 
         # 真画一遍：气泡在上、蛙在下，导出 PNG 供肉眼回归。
         # 排版规则照抄 pet_window._metrics：窗口宽取两者较宽者，各自水平居中，
@@ -3057,7 +3184,6 @@ def petcheck() -> int:
         font.setPixelSize(max(13, min(17, round(size * 0.62))))
         text = "他把书合上，抬头看了看窗外那片一直没有停过的雨。"
         body = pet_mod.measure_bubble(font, text, 360)
-        fsz = sp.size()
         w = max(body.width(), fsz.width())
         h = (body.height() + pet_mod.BUBBLE_TAIL + pet_window.BUBBLE_PAD
              + fsz.height())

@@ -104,6 +104,17 @@
    "interp": "blend",
    "mouth": true,
    "breath_cycles": 2
+  },
+  "reading-tongue": {
+   "row": 11,
+   "src_row": -1,
+   "frames": 7,
+   "fps": 6,
+   "loop": true,
+   "src_frames": 6,
+   "interp": "none",
+   "mouth": false,
+   "src": "src/tongue.png"
   }
  },
  "sfx": {

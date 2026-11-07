@@ -9,6 +9,9 @@
 精灵表来源：https://github.com/timerring/codex-pet-naiwa （MIT）
 1536x2288，每帧 192x208，8 列 x 11 行；9 行动画 + 2 行 16 方向注视。
 仓库没有公开行序文档，所以 ROW_MAP 是先猜后校对的产物 —— 改错了只改这张表。
+
+输出表在 ROW_MAP 之后还多一行 reading-tongue（见 EXTRA_ROWS），来自
+assets/naiwa/src/tongue.png，所以成品是 12 行。
 """
 from __future__ import annotations
 
@@ -103,6 +106,14 @@ ROW_MAP = {
     "thinking":      (8, 2, 4,  False, "ai"),
     "waiting":       (8, 6, 10, True,  "ai"),
     "reading":       (0, 6, 8,  True,  "blend"),   # 虚拟行：idle 帧 + 口型
+}
+
+# 不从源表来的额外行，追加在 ROW_MAP 之后：
+#   名 -> (源图, 帧数, fps, 循环, 末尾复制首帧次数)
+# 第二套朗读动画（微笑 + 吐舌）是图生图逐帧出的 6 格条，不是这张表的一行。
+# 末尾补一拍闭口：舌头缩回去有个停顿，否则 6 帧一轮像在抽搐。
+EXTRA_ROWS = {
+    "reading-tongue": ("src/tongue.png", 6, 6, True, 1),
 }
 
 # AI 中间帧目录（make_pet_ai.py --build 的产物）。找不到就整体退回传统插值。
@@ -300,6 +311,13 @@ def write_assets(img, sfx: dict[str, int], interp: bool = True) -> None:
     print(f"中和 jumping 白色地面阴影 {fixed} 像素")
 
     img, anims, cols = interpolate_sheet(img, allow=interp)
+    # 行数硬断言：漏了一行的话 manifest 里 row=11 会指到表外，
+    # 运行时表现为「吐舌那套切出来是全空」，很难当场看出原因
+    want_rows = len(ROW_MAP) + len(EXTRA_ROWS)
+    got_rows = img.height() // FRAME_H
+    if got_rows != want_rows:
+        sys.exit(f"输出表 {got_rows} 行，应为 ROW_MAP({len(ROW_MAP)}) "
+                 f"+ EXTRA_ROWS({len(EXTRA_ROWS)}) = {want_rows} 行")
     if "reading" in anims:
         rd = anims["reading"]
         n = paint_reading_mouths(img, rd["row"], rd["frames"])
@@ -457,6 +475,81 @@ def interp_anim(frames: list, loop: bool, ai_mids: dict | None = None) -> list:
     return out
 
 
+# ---------------------------------------------------------------- 额外行
+#
+# 第二套朗读动画不在这张源表里：它是图生图逐帧出的 6 格横条（src/tongue.png），
+# 每格已经是 192x208，但蛙的体量跟站立帧不一样，得先按高度归一再贴回格子，
+# 否则运行时两套轮着播会「一会儿大一会儿小」。
+
+def _alpha_box(a):
+    """一帧（numpy RGBA）的可见包围盒，右下开区间。空帧返回 (0, 0, 0, 0)。"""
+    import numpy as np
+    ys, xs = np.nonzero(a[:, :, 3] > 8)
+    if not len(xs):
+        return 0, 0, 0, 0
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def load_extra_row(rel: str, n: int, tail_dup: int = 0) -> list:
+    """把一张 n 格的横条切成帧；末尾按 tail_dup 复制首帧。"""
+    from PyQt6.QtGui import QImage
+
+    p = OUT / rel
+    if not p.exists():
+        sys.exit(f"缺少额外行素材：{p}")
+    img = QImage(str(p))
+    if img.isNull():
+        sys.exit(f"读不出额外行素材：{p}")
+    img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+    if img.height() != FRAME_H or img.width() != FRAME_W * n:
+        sys.exit(f"{p.name} 是 {img.width()}x{img.height()}，"
+                 f"应为 {FRAME_W * n}x{FRAME_H}")
+    frames = [_to_np(img.copy(c * FRAME_W, 0, FRAME_W, FRAME_H)) for c in range(n)]
+    frames += [frames[0]] * max(0, tail_dup)
+    return frames
+
+
+def fit_extra_row(frames, ref) -> list:
+    """按高度归一 + 底边/中心对齐，把额外行贴回 192x208 的格子。
+
+    以 alpha 包围盒的**高度**取系数，宽度不跟着拉 —— 模型画的肩宽本来就和
+    站立帧不同，横向拉平会变成另一种比例的蛙。系数每次构建现算，不写死。
+    """
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtGui import QImage, QPainter
+
+    def union_box(seq):
+        b = [x for x in (_alpha_box(a) for a in seq) if x[2] > 0]
+        if not b:
+            return None
+        return (min(x[0] for x in b), min(x[1] for x in b),
+                max(x[2] for x in b), max(x[3] for x in b))
+
+    rb, tb = union_box(ref), union_box(frames)
+    if rb is None or tb is None:
+        sys.exit("额外行或 idle 出现空帧，没法对齐")
+    k = (rb[3] - rb[1]) / max(1, tb[3] - tb[1])
+    dx = (rb[0] + rb[2]) / 2 - (tb[0] + tb[2]) / 2 * k
+    dy = rb[3] - tb[3] * k
+    print(f"额外行对齐      k={k:.4f} dx={dx:+.1f} dy={dy:+.1f}  "
+          f"(idle 盒 {rb} / 本行盒 {tb})")
+
+    out = []
+    for a in frames:
+        src = _to_qimg(a)
+        big = src.scaled(max(1, round(src.width() * k)),
+                         max(1, round(src.height() * k)),
+                         Qt.AspectRatioMode.IgnoreAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+        canvas = QImage(FRAME_W, FRAME_H, QImage.Format.Format_RGBA8888)
+        canvas.fill(0)
+        p = QPainter(canvas)
+        p.drawImage(QPoint(round(dx), round(dy)), big)
+        p.end()
+        out.append(_to_np(canvas))
+    return out
+
+
 def interpolate_sheet(img, allow: bool = True):
     """按 ROW_MAP 重排精灵表，插帧的动作帧数翻倍。
 
@@ -469,7 +562,7 @@ def interpolate_sheet(img, allow: bool = True):
     # ROW_MAP 的第一个数是**源表行号**（多个动画可以复用同一行，比如
     # thinking 和 waiting 都从 row8 切），输出行号按动画在表里的顺序另算。
     # 以前两者恰好相等，混用没出事；现在会覆盖同一行，必须分开
-    rows = len(ROW_MAP)
+    rows = len(ROW_MAP) + len(EXTRA_ROWS)
 
     frames_by_anim: dict[str, list] = {}
     anims: dict[str, dict] = {}
@@ -507,6 +600,23 @@ def interpolate_sheet(img, allow: bool = True):
             "src_frames": n,
             "interp": use or "none",
             **extra,
+        }
+
+    # 额外行：不是源表里的行，追加在后面。out_row 从 len(ROW_MAP) 续。
+    for i, (name, (rel, n, fps, loop, tail_dup)) in enumerate(EXTRA_ROWS.items()):
+        hi = load_extra_row(rel, n, tail_dup)
+        hi = fit_extra_row(hi, frames_by_anim["idle"])
+        frames_by_anim[name] = hi
+        anims[name] = {
+            "row": len(ROW_MAP) + i,
+            "src_row": -1,
+            "frames": len(hi),
+            "fps": fps,
+            "loop": loop,
+            "src_frames": n,
+            "interp": "none",
+            "mouth": False,
+            "src": rel,
         }
 
     cols = max(len(v) for v in frames_by_anim.values())

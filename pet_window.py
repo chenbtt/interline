@@ -793,8 +793,11 @@ class PetWindow(QWidget):
     def set_base(self, name: str):
         self.state.set_base(name)
         # 吸附态不推进站立动画，朗读开关得单独告诉相位状态机：
-        # 它自己按 10fps 推口型，停下立刻闭嘴
-        self.edge_state.set_reading(name == pet.READING)
+        # 它自己按 10fps 推口型，停下立刻闭嘴。
+        # 朗读有两套 base（呼吸口型 / 微笑吐舌），必须问 is_reading，
+        # 写成 name == pet.READING 的话随机到吐舌那套时贴边嘴就永久闭着
+        self.edge_state.set_reading(pet.is_reading(name))
+
         self.update()
 
     def fx(self, name: str):
@@ -824,9 +827,12 @@ class PetWindow(QWidget):
 
     def review(self):
         """读完了：抬头等翻页。"""
-        self.state.set_base(pet.IDLE)
+        # 必须走 self.set_base 而不是 self.state.set_base：后者不会通知
+        # edge_state，吸附态会带着上一轮的朗读口型一路动下去
+        self.set_base(pet.IDLE)
         self.state.play(pet.REVIEW, 3000)
         self.update()
+
 
     def preview_sound(self):
         audio = self._audio_obj()
