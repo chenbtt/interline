@@ -474,6 +474,7 @@ class PetWindow(QWidget):
             g = self.geometry()
             self.st.set("pet.x", g.x())
             self.st.set("pet.y", g.y())
+            self.edge.pick_pose(d)      # 每次吸到边上随机挑一种姿势
             self._snap_to(d, pt)
 
     def _save_edge(self) -> None:
@@ -512,6 +513,7 @@ class PetWindow(QWidget):
             anchor = QPoint(scr.left() + round(t * scr.width()), c.y())
         else:
             anchor = c
+        self.edge.pick_pose(d)          # 启动恢复也算一次吸附，照样随机
         self._snap_to(d, anchor, animate=False)
 
     # -------------------------------------------------- 气泡悬停工具条

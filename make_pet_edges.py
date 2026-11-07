@@ -1,14 +1,21 @@
 """奶蛙吸附边缘素材：构建期工具（只产美术，不含吸附逻辑）。
 
     python make_pet_edges.py --prep     # 切参考帧、出 1024 参考图（图生图用）
-    python make_pet_edges.py --build    # 抠图 + 对齐 + 八向三相位裁切 + 量嘴位
-    python make_pet_edges.py --mouth    # 只补 meta.json 的嘴位，不动 24 张成品图
+    python make_pet_edges.py --build    # 抠图 + 对齐 + 七向三相位裁切 + 量嘴位
+    python make_pet_edges.py --mouth    # 只补 meta.json 的嘴位，不动成品图
     python make_pet_edges.py --sheet    # 八向 base 帧 3x3 拼图
     python make_pet_edges.py --context  # 模拟桌面贴边的场景图
     python make_pet_edges.py --anim     # 胶片条 + GIF，验证动画
 
-产物：assets/naiwa/edges/edge-{n,ne,e,se,s,sw,w,nw}-{base,blink,hi}.png
-      24 张 256x256 RGBA
+产物：assets/naiwa/edges/edge-{n,ne,e,se,sw,w,nw}-{base,blink,hi}.png
+      21 张 256x256 RGBA
+      assets/naiwa/edges/edge-s-p{1..4}-{base,blink}.png
+      8 张，底边四套躺姿，**不由本脚本生成**（见下）
+
+底边 s 是多姿态方向：四套躺姿分别图生图、逐张裁切落格，meta.json 里
+写成 poses 数组。所以 --build 见到已有 poses 就整个跳过该方向，预览类
+命令取第一套；否则一次重跑会把四套图和 poses 一起冲成单套，
+运行时表现是「每次都同一个姿势」，很难当场发现。
 
 素材来源是两个目录，文件名带相位后缀（@blink / @hi）：
     assets/naiwa/edges/src/side/   斜姿态，出七向（四边里的三条 + 四角）
@@ -62,6 +69,37 @@ DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 # 相位：base 常态、blink 眨眼、hi 抬手（鼠标指上来时用）。
 # 缺哪个就退回 base，不会空窗。
 PHASES = (("base", "in", "out", "blink") if BREATH else ("base", "blink")) + ("hi",)
+
+
+def _posed() -> dict[str, dict]:
+    """meta.json 里已经是多姿态的方向（目前只有底边 s 的四套躺姿）。
+
+    这些方向的素材不是 --build 切的：四套是分别图生图、逐张裁切落格的。
+    所以 --build / --sheet / --context / --anim 一律绕开它们，别用单套的
+    逻辑去覆盖——覆盖了不只是图被换掉，meta 里的 poses 也会被写回单套，
+    运行时随机选姿势就失效了，而失效的样子是「每次都同一个姿势」，很容易漏看。
+    """
+    p = OUT / "meta.json"
+    if not p.exists():
+        return {}
+    try:
+        dirs = (json.loads(p.read_text(encoding="utf-8")) or {}).get("dirs") or {}
+    except Exception:
+        return {}
+    return {d: g for d, g in dirs.items() if g.get("poses")}
+
+
+def base_png(d: str) -> Path:
+    """该方向用来做预览的 base 帧。多姿态方向取第一套。"""
+    return png_for(d, "base")
+
+
+def png_for(d: str, phase: str) -> Path:
+    """该方向该相位的图。多姿态方向取第一套——预览够用，真随机在运行时。"""
+    poses = (_posed().get(d) or {}).get("poses") or []
+    if poses:
+        return OUT / f"edge-{d}-{poses[0]['id']}-{phase}.png"
+    return OUT / f"edge-{d}-{phase}.png"
 
 
 # ---------------------------------------------------------------- 切参考帧
@@ -369,6 +407,9 @@ def oriented(frames: dict[str, tuple[Image.Image, int, int]],
 
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    posed = _posed()
+    if posed:
+        print(f"  多姿态方向 {', '.join(sorted(posed))} 保持原样，不参与本次裁切")
     side_src = _frames(SRC_SIDE) if SRC_SIDE.is_dir() else {}
     if "base" not in side_src:
         print(f"没有素材：把图生图结果放进 {SRC_SIDE}")
@@ -401,6 +442,8 @@ def build() -> None:
         print(f"顶边姿态 = 缺省，edge-n 退回对半切（放一张进 {SRC_PEEK} 可换掉）")
 
     for d in DIRS:
+        if d in posed:
+            continue
         cfg = SPEC[d]
         use_peek = d == "n" and bool(peek)
         # 先翻到目标朝向再算几何：镜像会换掉「哪半边是被切掉的那侧」，
@@ -429,6 +472,25 @@ def build() -> None:
     bad = 0
     geo: dict[str, dict] = {}
     for d in DIRS:
+        if d in posed:
+            # 多姿态方向：只核对四套图都在、切口都贴边，几何照抄 meta
+            g0 = posed[d]
+            cut = g0.get("cut", "bottom")
+            miss = [p["id"] for p in g0.get("poses") or []
+                    if not all((OUT / f'edge-{d}-{p["id"]}-{ph}.png').exists()
+                               for ph in ("base", "blink"))]
+            line = [f'{len(g0.get("poses") or [])} 套', "缺=" + ",".join(miss) if miss else "齐"]
+            for p in g0.get("poses") or []:
+                a = np.asarray(Image.open(OUT / f'edge-{d}-{p["id"]}-base.png'))[:, :, 3]
+                x0, y0, x1, y1 = _alpha_box(Image.fromarray(a))
+                ok = {"left": x0 == 0, "right": x1 == CANVAS,
+                      "top": y0 == 0, "bottom": y1 == CANVAS}[cut]
+                if not ok:
+                    bad += 1
+                    line.append(f'!{p["id"]}切口没贴边')
+            print(f"  edge-{d}: " + "  ".join(line))
+            geo[d] = g0
+            continue
         cfg = SPEC[d]
         cut = "top" if (d == "n" and peek) else cfg["cut"]
         line = []
@@ -469,6 +531,8 @@ def build() -> None:
     # 边角上错几像素）。写盘交给 write_meta，--mouth 也走同一份格式。
     if len(geo) == len(DIRS):
         for d in DIRS:
+            if d in posed:
+                continue      # 多姿态方向不画口型，量了也用不上
             m = find_mouth(OUT / f"edge-{d}-base.png")
             if m:
                 geo[d]["mouth"] = m
@@ -500,7 +564,7 @@ def sheet() -> None:
         if name is None:
             d.text((x + cell // 2 - 18, y + cell // 2 - 6), "corner", fill=(90, 98, 110))
             continue
-        img = Image.open(OUT / f"edge-{name}-base.png")
+        img = Image.open(base_png(name))
         bg.alpha_composite(img, (x, y))
         d.text((x + 6, y + 6), name, fill=(150, 160, 175))
 
@@ -539,7 +603,7 @@ def context() -> None:
         "s":  (W // 2 - c // 2, sy1 - c), "se": (sx1 - c, sy1 - c),
     }
     for name, (x, y) in spots.items():
-        fig = Image.open(OUT / f"edge-{name}-base.png")
+        fig = Image.open(base_png(name))
         img.alpha_composite(fig, (x, y))
         # 标签放在蛙内侧，避免压到画面主体
         lx = x + c + 8 if x < W // 2 else x - 60
@@ -572,7 +636,7 @@ def anim() -> None:
         y = pad + top + ri * (cell + gap)
         d.text((pad, y + cell // 2 - 4), name, fill=(140, 150, 165))
         for ci, phase in enumerate(PHASES):
-            p = OUT / f"edge-{name}-{phase}.png"
+            p = png_for(name, phase)
             if not p.exists():
                 continue
             x = pad + gut + ci * (cell + gap)
@@ -594,7 +658,7 @@ def anim() -> None:
             fd.rectangle([x0 + 4, 4, x0 + CANVAS - 5, CANVAS - 5],
                          fill=(24, 27, 32, 255), outline=(52, 58, 68, 255))
             fd.text((x0 + 12, 12), name, fill=(130, 140, 155))
-            p = OUT / f"edge-{name}-{phase}.png"
+            p = png_for(name, phase)
             if p.exists():
                 fr.alpha_composite(Image.open(p), (x0, 0))
         fd.text((12, CANVAS - 22), phase, fill=(130, 140, 155))
@@ -649,12 +713,24 @@ def find_mouth(path: Path) -> list[float] | None:
 
 
 def write_meta(geo: dict) -> None:
-    """写 meta.json。一个方向一行，别用 json.dumps(indent=) 把数组展开。"""
+    """写 meta.json。一个方向一行，别用 json.dumps(indent=) 把数组展开。
+
+    多姿态方向（底边 s）写成一整行 `poses` 数组：每套带自己的 base / box，
+    cut 提到方向级——四套都是 bottom，逐套重复没有意义。
+    """
     out = ["{", f' "canvas": {CANVAS},',
            f' "phases": {json.dumps(list(PHASES))},', ' "dirs": {']
     for i, d in enumerate(DIRS):
         g = geo[d]
         tail = "," if i < len(DIRS) - 1 else ""
+        if g.get("poses"):
+            # 多姿态展开成多行：四套盒子横着排一行人眼读不了，
+            # 对不上号时改错一行就该看得见
+            ps = ",\n".join(
+                '   {"id": "%s", "base": %s, "box": %s}'
+                % (p["id"], p["base"], p["box"]) for p in g["poses"])
+            out.append(f'  "{d}": {{"cut": "{g["cut"]}", "poses": [\n{ps}\n  ]}}{tail}')
+            continue
         mouth = f', "mouth": {g["mouth"]}' if g.get("mouth") else ""
         out.append(f'  "{d}": {{"cut": "{g["cut"]}", '
                    f'"base": {g["base"]}, "box": {g["box"]}{mouth}}}{tail}')
@@ -664,15 +740,19 @@ def write_meta(geo: dict) -> None:
 
 
 def mouth_only() -> None:
-    """只补 8 向嘴位，不重出 24 张 PNG。
+    """只补单姿态方向的嘴位，不重出成品图。
 
     --build 要重跑抠图和相位对齐，源姿态是图生图产物，换个 cv2/PIL
     版本就可能有像素级差异。只想给已有素材补嘴位时用这个，图一个字节
-    都不动。
+    都不动。多姿态方向（底边四套躺姿）没有嘴位，跳过。
     """
     meta = json.loads((OUT / "meta.json").read_text(encoding="utf-8"))
     geo = meta.get("dirs") or {}
+    posed = _posed()
     for d in DIRS:
+        if d in posed:
+            print(f"  {d:<3} 多姿态，无口型（跳过）")
+            continue
         m = find_mouth(OUT / f"edge-{d}-base.png")
         if m is None:
             print(f"  ！{d} 找不到嘴线")

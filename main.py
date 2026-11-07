@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 62
+BUILD_VERSION = 63
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -2755,20 +2755,32 @@ def selftest() -> int:
             edge_ok = False
             try:
                 em = _json.loads(edge_meta.read_text(encoding="utf-8"))
-                want = [(d, p) for d in (em.get("dirs") or {})
-                        for p in (em.get("phases") or ["base"])]
-                lack = [f"{d}-{p}" for d, p in want
-                        if not assets.naiwa(f"edges/edge-{d}-{p}.png").exists()]
                 dirs = em.get("dirs") or {}
+                phases = em.get("phases") or ["base"]
+                # 单姿态方向：dir × phase；多姿态方向（s）：每个 pose 的 base/blink
+                want = []
+                for d, g in dirs.items():
+                    poses = g.get("poses")
+                    if poses:
+                        for p in poses:
+                            want += [f"edge-{d}-{p['id']}-base",
+                                     f"edge-{d}-{p['id']}-blink"]
+                    else:
+                        want += [f"edge-{d}-{ph}" for ph in phases]
+                lack = [s for s in want
+                        if not assets.naiwa(f"edges/{s}.png").exists()]
                 with_mouth = [d for d, g in dirs.items()
-                              if len(g.get("mouth") or []) == 3]
+                              if not g.get("poses")
+                              and len(g.get("mouth") or []) == 3]
+                with_pose = [d for d, g in dirs.items() if g.get("poses")]
                 edge_ok = bool(want) and not lack
                 log(f"pet edge  = {'OK ' + str(len(want)) + ' 张' if edge_ok else 'MISSING ' + str(lack[:4])}")
-                # 少一个方向的嘴位，那一向会一直闭着嘴，不报错也看不出
-                # 为什么——在这里直接卡住
-                ok_mouth = len(dirs) == 8 and len(with_mouth) == 8
-                log(f"pet mouth = 贴边 {len(with_mouth)}/{len(dirs)} 向有嘴位 "
-                    f"{'OK' if ok_mouth else 'FAIL'}")
+                # 其余 7 向必须有嘴位；s 换成 4 套躺姿后暂时不画口型（每张
+                # 嘴位置都不同，自动测不准，宁可不画也不画到脸上别处）
+                ok_mouth = (len(dirs) == 8 and len(with_mouth) == 7
+                            and len(with_pose) == 1)
+                log(f"pet mouth = 贴边 {len(with_mouth)}/{len(dirs)} 向有嘴位"
+                    f"（s 多姿态暂不画口型） {'OK' if ok_mouth else 'FAIL'}")
                 if not ok_mouth:
                     rc = 2
             except Exception as e:
@@ -3108,6 +3120,13 @@ def toolcheck() -> int:
 
         st = store_mod.Store()
         st.set("pet.snap_dir", "")
+        # 音效关掉。奶蛙一亮相就会静音预热音频链路，收尾那个
+        # `stop()/setMuted()` 在 ffmpeg 后端上等设备端点时是会**阻塞**的，
+        # 而这里第一次长时间 processEvents() 正好把那个定时器派发出去——
+        # 结果就是自检卡死在「预热收尾」，后面的断言一条都跑不到。
+        # 自检本来也不验音效（那条在 --selftest 里），关掉顺手让结果
+        # 不依赖当前机器有没有可用输出设备。
+        st.set("pet.sound", False)
         text = ("我们试图用我们仅有的天分去表达我们深层的感受，去表达我们"
                 "对前人所有贡献的感激，去为历史长河加上一点儿什么")
         win = pw.PetWindow(st, lambda: QFont(store_mod.UI_FONT),
@@ -3869,8 +3888,12 @@ def edgecheck() -> int:
         mouths = {}
         for d in anchors:
             m = (win.edge.geo(d) or {}).get("mouth")
-            ok = bool(m) and len(m) == 3 and 0 <= m[0] <= win.edge.canvas()
             mouths[d] = m
+            if not m and win.edge.pose_count(d):
+                # s 换成多姿态后没有统一嘴位：不画口型，不算失败
+                log(f"  嘴位 {d:<3} 多姿态，无口型（跳过）")
+                continue
+            ok = bool(m) and len(m) == 3 and 0 <= m[0] <= win.edge.canvas()
             rc |= 0 if ok else 2
             log(f"  嘴位 {d:<3} {m} {'ok' if ok else '??'}")
 
@@ -3949,6 +3972,8 @@ def edgecheck() -> int:
         # 差异质心和预期嘴位，缩放再改也能当场抓出来。
         import math as _math
 
+        n_mouth = sum(1 for _d in ("n", "ne", "e", "se", "s", "sw", "w", "nw")
+                      if mouths.get(_d))
         placed = 0
         for i, d in enumerate(("n", "ne", "e", "se", "s", "sw", "w", "nw")):
             row, col = divmod(i, 2)
@@ -3973,9 +3998,9 @@ def edgecheck() -> int:
             placed += bool(hit)
             log(f"  口型落位 {d:<3} 差 {n:3d} 像素 "
                 f"偏移 ({dx:+.1f},{dy:+.1f}) {'ok' if hit else '??'}")
-        ok = placed == 8
+        ok = n_mouth > 0 and placed == n_mouth
         rc |= 0 if ok else 2
-        log(f"  口型落位 {placed}/8 向贴在嘴线上 {'ok' if ok else '??'}")
+        log(f"  口型落位 {placed}/{n_mouth} 向贴在嘴线上 {'ok' if ok else '??'}")
 
         m_png = here / "screenshots" / "pet-edge-reading.png"
         dm = (m_png if m_png.parent.is_dir()

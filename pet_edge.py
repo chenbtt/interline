@@ -132,8 +132,9 @@ class EdgeAssets:
         self._meta: dict | None = None
         self._ok: bool | None = None
         self._scale = 1.0
-        self._imgs: dict[tuple[str, str, float], QImage] = {}
-        self._pms: dict[tuple[str, str, float], QPixmap] = {}
+        self._pose: dict[str, str] = {}      # 方向 -> 当前选中的姿态 id（s 有四套）
+        self._imgs: dict[tuple, QImage] = {}
+        self._pms: dict[tuple, QPixmap] = {}
 
     # -------------------------------------------------- 加载
 
@@ -179,7 +180,41 @@ class EdgeAssets:
         return QSize(n, n)
 
     def geo(self, d: str) -> dict | None:
-        return ((self._meta or {}).get("dirs") or {}).get(d)
+        """该方向当前生效的几何。
+
+        单姿态方向（其余 7 向）直接返回 dir 条目；`s` 有 poses 列表，
+        返回当前选中的那一套，并把 dir 的 `cut` 一并带上——窗口那边
+        只认一份几何，不用区分单/多姿态。
+        """
+        g = ((self._meta or {}).get("dirs") or {}).get(d)
+        if not g:
+            return None
+        poses = g.get("poses")
+        if not poses:
+            return g
+        pid = self._pose.get(d)
+        cur = next((p for p in poses if p.get("id") == pid), poses[0])
+        return cur if "cut" in cur else {**cur, "cut": g.get("cut")}
+
+    def pick_pose(self, d: str) -> str:
+        """多姿态方向随机换一列，返回新 id；单姿态方向返回空串。
+
+        吸附前调一次，就是「每次吸到边上随机来一种姿势」。清缓存是因为
+        同一方向不同姿态的图不一样，留着会串。
+        """
+        g = ((self._meta or {}).get("dirs") or {}).get(d) or {}
+        poses = g.get("poses") or []
+        if not poses:
+            return ""
+        pid = random.choice(poses).get("id", "")
+        self._pose[d] = pid
+        self._imgs.clear()
+        self._pms.clear()
+        return pid
+
+    def pose_count(self, d: str) -> int:
+        g = ((self._meta or {}).get("dirs") or {}).get(d) or {}
+        return len(g.get("poses") or [])
 
     def phases(self) -> tuple[str, ...]:
         ph = (self._meta or {}).get("phases") or ["base"]
@@ -188,11 +223,16 @@ class EdgeAssets:
     # -------------------------------------------------- 取图
 
     def _image(self, d: str, phase: str) -> QImage | None:
-        key = (d, phase, round(self._scale, 3))
+        g = self.geo(d)
+        if g is None:
+            return None
+        pid = g.get("id") or ""
+        key = (d, pid, phase, round(self._scale, 3))
         if key in self._imgs:
             return self._imgs[key]
 
-        path = assets.naiwa(f"edges/edge-{d}-{phase}.png")
+        stem = f"edges/edge-{d}-{pid}" if pid else f"edges/edge-{d}"
+        path = assets.naiwa(f"{stem}-{phase}.png")
         if not Path(path).exists() and phase != "base":
             # 缺相位就退回常态，别留空窗
             return self._image(d, "base")
@@ -212,7 +252,9 @@ class EdgeAssets:
         return img
 
     def pixmap(self, d: str, phase: str) -> QPixmap | None:
-        key = (d, phase, round(self._scale, 3))
+        g = self.geo(d)
+        pid = (g or {}).get("id") or ""
+        key = (d, pid, phase, round(self._scale, 3))
         pm = self._pms.get(key)
         if pm is not None:
             return pm

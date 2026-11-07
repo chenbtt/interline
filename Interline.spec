@@ -19,10 +19,14 @@ import glob as _glob
 _NAIWA = "assets/naiwa"
 _EDGE_DIRS = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 _EDGE_PHASES = ("base", "blink", "hi")
-_EDGES = sorted(_glob.glob(f"{_NAIWA}/edges/*.png"))
-assert len(_EDGES) == len(_EDGE_DIRS) * len(_EDGE_PHASES), (
-    f"贴边素材应为 {len(_EDGE_DIRS) * len(_EDGE_PHASES)} 张，"
-    f"实际 {len(_EDGES)} 张——先跑 make_pet_edges.py --build")
+# s 方向有四套姿态（p1..p4），每套 base/blink；其余 7 向仍是 base/blink/hi。
+_EDGE_BASE = (len(_EDGE_DIRS) - 1) * len(_EDGE_PHASES)   # s 已改成多姿态
+_EDGE_POSES = ("p1", "p2", "p3", "p4")
+_EDGE_EXTRA = len(_EDGE_POSES) * 2          # 每个姿态 base + blink
+_EDGES = sorted(_glob.glob(f"{_NAIWA}/edges/edge-*.png"))
+assert len(_EDGES) == _EDGE_BASE + _EDGE_EXTRA, (
+    f"贴边素材应为 {_EDGE_BASE + _EDGE_EXTRA} 张（{_EDGE_BASE} 基础 + "
+    f"{_EDGE_EXTRA} 姿态帧），实际 {len(_EDGES)} 张——先跑 make_pet_edges.py --build")
 
 _PET_DATAS = [
     (f"{_NAIWA}/sheet.png", _NAIWA),
