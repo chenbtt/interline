@@ -42,7 +42,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 63
+BUILD_VERSION = 64
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -4113,6 +4113,21 @@ def install_excepthook(get_win):
 
 
 def main():
+    if "--envdump" in sys.argv:
+        # 排查「更新后重启报 python DLL」专用：把启动时看到的 TEMP / 解包目录写出来
+        i = sys.argv.index("--envdump")
+        out = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        if out:
+            try:
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write(f"TEMP={os.environ.get('TEMP', '')}\n")
+                    f.write(f"TMP={os.environ.get('TMP', '')}\n")
+                    f.write(f"MEIPASS={getattr(sys, '_MEIPASS', '')}\n")
+                    f.write(f"EXE={sys.executable}\n")
+                    f.write(f"FROZEN={getattr(sys, 'frozen', False)}\n")
+            except Exception:
+                pass
+        return 0
     if "--selftest" in sys.argv:
         return selftest()
     if "--petcheck" in sys.argv:

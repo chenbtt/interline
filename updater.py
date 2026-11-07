@@ -245,36 +245,46 @@ class Downloader(QObject):
 def build_script(new_exe: Path, target: Path) -> str:
     """生成替换脚本。单独拆出来是为了能测，不必真的覆盖 exe。
 
-    运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。用 ping 代替
-    timeout 等待：cmd 以无窗口方式启动时没有控制台，timeout 会直接报错。
-    重试上限 40 次（约 80 秒），避免进程一直不退时脚本死循环。
+    运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。重试上限 600 次
+    （每次忙等约 0.2s，约两分钟），避免进程一直不退时脚本死循环。
 
-    两个必须处理的坑：
-    1. 用 move 而不是 copy：同卷是重命名，瞬间完成，不会留下写了一半的 exe；
-    2. PyInstaller onefile 把文件解压到 %TEMP%\\_MEIxxxxxx 再加载 python3xx.dll，
-       目录名按秒级种子生成。更新完立刻启动，新旧进程可能撞上同一个目录名，
-       旧进程退出时正在删它 —— 新进程就会报「Failed to load Python DLL」。
-       所以给新进程单独指一个 TEMP，和旧进程彻底隔开。
+    三个必须处理的坑：
+    1. **不能用 ping 当延时器**。原来的写法是 `ping 127.0.0.1 -n 4`，但有些
+       机器上回环 ping 会 100% 超时（实测某台 Win11），每个包要等满超时，
+       脚本会卡十几秒才往下走。现在改成纯 CPU 忙等（for /l），不碰网络，
+       也不会弹出控制台窗口。
+    2. **用 move /y 直接覆盖，失败就重试**。同卷是重命名，瞬间完成，不会留
+       下写了一半的 exe；旧进程还占着文件时 move 必失败，一直重试到成功，
+       天然起到「等旧进程把 exe 释放 / 退出」的作用，不用盲猜等几秒。
+    3. **每次给新进程一个全新的 TEMP 子目录**。PyInstaller onefile 把文件
+       解压到 %TEMP%\\_MEIxxxxxx 再加载 python3xx.dll，目录名按秒级种子生成。
+       更新完立刻启动时，新旧进程可能撞上同一个目录名，旧进程退出时正在删
+       它 —— 新进程就报「Failed to load Python DLL」。用 run\\<随机> 让每次
+       启动都落在不同目录，从物理上杜绝撞名（哪怕时序重叠也没关系）。
     """
     return f"""@echo off
 setlocal
-ping 127.0.0.1 -n 4 >nul
 set /a n=0
 :retry
-if exist "{target}.old" del /q "{target}.old" >nul 2>&1
-move /y "{target}" "{target}.old" >nul 2>&1
 move /y "{new_exe}" "{target}" >nul 2>&1
-if exist "{target}" goto done
+rem 新包被移走 = 替换成功；仍存在说明旧进程还占着 exe，继续等
+if not exist "{new_exe}" goto done
 set /a n+=1
-if %n% geq 40 exit /b 1
-ping 127.0.0.1 -n 2 >nul
+if %n% geq 600 exit /b 1
+call :nap
 goto retry
 :done
-set "TEMP=%LOCALAPPDATA%\\Interline\\run"
+rem 每次全新 TEMP 子目录，彻底避开 PyInstaller 的 _MEI 目录撞名
+set "TEMP=%LOCALAPPDATA%\\Interline\\run\\%RANDOM%%RANDOM%"
 set "TMP=%TEMP%"
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1
 start "" "{target}"
 del "%~f0"
+exit /b 0
+:nap
+rem 约 0.2s 忙等；不依赖 ping / timeout，无控制台也能跑
+for /l %%i in (1,1,400000) do rem
+exit /b 0
 """
 
 
@@ -287,9 +297,10 @@ def install_and_restart(new_exe: Path) -> bool:
     script = Path(tempfile.gettempdir()) / "interline_update.cmd"
     try:
         script.write_text(build_script(new_exe, target), encoding="gbk")
-        flags = 0
-        flags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        # 只传 DETACHED_PROCESS：无控制台，且父进程（旧 exe）退出后脚本仍能继续跑。
+        # 之前和 CREATE_NO_WINDOW 一起传，MSDN 明确说两者不能合用（语义冲突），
+        # 实测偶尔会弹出可见的 cmd 窗口。
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         subprocess.Popen(["cmd", "/c", str(script)],
                          creationflags=flags, close_fds=True)
         return True
