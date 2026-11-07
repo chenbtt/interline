@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import random
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, QRectF, QSize, Qt
@@ -20,7 +19,7 @@ import theme
 
 IDLE = "idle"
 READING = "reading"        # 朗读中：呼吸 + 开口说话（构建期把口型烘进精灵表）
-TONGUE = "reading-tongue"  # 朗读中（第二套）：微笑 + 伸舌头眨眼，独立 6 帧素材
+TONGUE = "reading-tongue"  # 点蛙反应之一：微笑 + 伸舌头（独立 6 帧素材）
 RUNNING = "running"
 THINKING = "thinking"      # 停下朗读后的姿势：抬手托腮，播一次就停住（不循环）
 WAITING = "waiting"        # 抬手→放下→抱臂的原地小动作，只在朗读中偶尔播一次
@@ -31,10 +30,11 @@ FAILED = "failed"
 RUN_LEFT = "running-left"
 RUN_RIGHT = "running-right"
 
-# 两套朗读动画。用哪一套由 ReadingPicker 在每次开始朗读时随机定
-READING_STATES = (READING, TONGUE)
+BASE_STATES = (IDLE, READING, RUNNING, THINKING)
 
-BASE_STATES = (IDLE, READING, TONGUE, RUNNING, THINKING)
+# 摸一下蛙时的随机反应。朗读时**不用**吐舌那套：它张着嘴大笑的表情放在
+# 念书的旁边很出戏，只有用户主动点它才播，播完回朗读/发呆
+POKE_ACTS = (JUMPING, TONGUE)
 
 # 精灵表里所有该有帧的动画名。自检拿它跟 manifest 对账，
 # 新增一套忘了建行，这里会当场报出来
@@ -46,21 +46,12 @@ ALL_ANIMS = (IDLE, READING, TONGUE, RUNNING, THINKING, WAITING,
 AMBIENT_ACTS = (WAITING, REVIEW, RUNNING)
 
 # 瞬时动作的抢占权，大的能打断小的
-PRIORITY = {IDLE: 0, READING: 0, TONGUE: 0, RUNNING: 0, THINKING: 0,
-            WAITING: 1, WAVING: 1, JUMPING: 1, REVIEW: 2, FAILED: 3,
-            RUN_LEFT: 5, RUN_RIGHT: 5}
+PRIORITY = {IDLE: 0, READING: 0, RUNNING: 0, THINKING: 0,
+            WAITING: 1, WAVING: 1, JUMPING: 1, TONGUE: 1, REVIEW: 2,
+            FAILED: 3, RUN_LEFT: 5, RUN_RIGHT: 5}
 
 # base 之间切换的最小驻留，否则快速翻页会闪
 MIN_DWELL_MS = 300
-
-
-def is_reading(name: str) -> bool:
-    """是不是「正在朗读」的那一类 base（两套都算）。
-
-    唯一用处是贴边态的嘴：写死 name == READING 的话，随机到吐舌那套时
-    吸附态的嘴就永远闭着了。
-    """
-    return name in READING_STATES
 
 
 BUBBLE_PAD_X = 14
@@ -174,25 +165,6 @@ class PetSprite:
 
 
 # ---------------------------------------------------------------- 状态机
-
-class ReadingPicker:
-    """每次开始朗读随机挑一套朗读动画，整个会话内不变。
-
-    不能在 _pet_sync_base 里现选：那个函数在暂停、老板键、换句、翻章时
-    都会被调一遍，跟着随机就会出现「念着念着换了一身」。
-    只在用户真正重新开始朗读时调 new_session()。
-    """
-
-    def __init__(self) -> None:
-        self._cur = READING
-
-    def new_session(self) -> str:
-        self._cur = random.choice(READING_STATES)
-        return self._cur
-
-    def current(self) -> str:
-        return self._cur
-
 
 class PetState:
     """三层结构：base 持续态 / transient 一次性 / direction 独占。

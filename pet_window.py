@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import random
 import time
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -793,10 +794,8 @@ class PetWindow(QWidget):
     def set_base(self, name: str):
         self.state.set_base(name)
         # 吸附态不推进站立动画，朗读开关得单独告诉相位状态机：
-        # 它自己按 10fps 推口型，停下立刻闭嘴。
-        # 朗读有两套 base（呼吸口型 / 微笑吐舌），必须问 is_reading，
-        # 写成 name == pet.READING 的话随机到吐舌那套时贴边嘴就永久闭着
-        self.edge_state.set_reading(pet.is_reading(name))
+        # 它自己按 10fps 推口型，停下立刻闭嘴
+        self.edge_state.set_reading(name == pet.READING)
 
         self.update()
 
@@ -814,7 +813,12 @@ class PetWindow(QWidget):
             if audio is not None and audio.play(clip, cooldown_ms=cooldown):
                 hold = float(audio.duration(clip))
                 self.sound_started.emit(int(hold))
-        if hold <= 0:
+        if name == pet.TONGUE:
+            # 吐舌没有音效，但兜底算式会给到 3.5 秒（7 帧 × 3 轮），
+            # 那个长度已经不像「反应一下」而像卡住了。只播一个完整循环多点余量。
+            n = len(self.sprite.frames(name)) or 7
+            hold = 1000.0 / max(1, self.sprite.fps(name)) * n * 1.2
+        elif hold <= 0:
             n = len(self.sprite.frames(name)) or 4
             hold = 1000.0 / max(1, self.sprite.fps(name)) * n * 3
 
@@ -1174,7 +1178,8 @@ class PetWindow(QWidget):
                 # 点蛙身就等于点气泡：播 / 停
                 self.bubble_clicked.emit()
             else:
-                self.fx(pet.JUMPING)           # 摸它一下
+                # 摸它一下：随机给个反应，跳一下笑一声，或者吐个舌头
+                self.fx(random.choice(pet.POKE_ACTS))
         elif hit == "bubble":
             self.bubble_clicked.emit()
         ev.accept()
