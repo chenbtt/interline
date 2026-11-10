@@ -622,15 +622,23 @@ def _tool_glyph(p: QPainter, rect: QRect, kind: str,
 
 def draw_tool_button(p: QPainter, rect: QRect, kind: str, st,
                      hover: bool = False, playing: bool = False,
-                     collapsed: bool = False) -> None:
-    """一颗气泡工具按钮：圆角底片 + 单色图标。底色沿用气泡，随主题走。"""
+                     collapsed: bool = False, surface: bool = True) -> None:
+    """一颗气泡工具按钮：圆角底片 + 单色图标。底色沿用气泡，随主题走。
+
+    surface=False 时只画图标、不画它自己的圆角底片——给「整条工具带共用
+    一个胶囊底」的场景用（一行模式浮层就是一颗胶囊，按钮直接画在胶囊上、
+    hover 才提亮，而不是每颗按钮各带一块底片）。
+    """
+    fg = QColor(st.get("colors.fg", "#c3cbd6"))
+    fg.setAlpha(255 if hover else 200)
+    if not surface:
+        _tool_glyph(p, rect, kind, fg, playing, collapsed)
+        return
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     bg = QColor(st.get("colors.bg", "#0d0f12"))
     bg.setAlpha(max(205, min(248, int(st.get("bg_alpha", 236))
                              + (10 if hover else 0))))
-    fg = QColor(st.get("colors.fg", "#c3cbd6"))
-    fg.setAlpha(255 if hover else 205)
     bodyf = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
     p.setPen(QPen(theme.overlay_pen(st, 90 if hover else 40), 1.0))
     p.setBrush(bg)

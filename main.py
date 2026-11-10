@@ -44,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 68
+BUILD_VERSION = 69
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -53,6 +53,23 @@ HEADER_H = 36
 RESIZE_MARGIN = 14
 # 单行模式下能拖动窗口的顶部窄条高度（其余区域留给点字和翻句）
 DRAG_ZONE = 8
+# 一行模式：窗口固定宽度（不再每句变宽），宽度可在 ONELINE_MIN_W..MAX_W 间
+# 用鼠标拖右下角调整；句子比窗口长就出横向细滚动条，方向键左右滚、上下切句
+ONELINE_MIN_W = 280
+ONELINE_MAX_W = 760
+# 正文区 QSS：常规阅读态与一行模式态两轮。一行模式给横向滚动条做细
+# （7px 高、圆角手柄、隐藏两端的箭头），常规态没有横向条、竖条按需出现
+VIEW_BASE_SS = "QTextEdit{background:transparent;border:none;}"
+VIEW_ONELINE_SS = (
+    "QTextEdit{background:transparent;border:none;}"
+    "QScrollBar:horizontal{height:7px;background:transparent;margin:0 2px;}"
+    "QScrollBar::handle:horizontal{"
+    "background:rgba(140,150,165,150);border-radius:3px;min-width:28px;}"
+    "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal"
+    "{width:0;height:0;}"
+    "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal"
+    "{background:transparent;}"
+)
 # 奶读模式：气泡尾巴尖到蛙头顶的间隙
 # 奶读模式下判「这是拖拽不是点击」的位移阈值
 
@@ -408,6 +425,9 @@ class Reader(QWidget):
         self._normal_geo = None
         self._one_line_pos = (0, 0.0)
         self._one_line_idx = 0
+        # 进入时定一次的「固定宽度」：之后每句都沿用，点下一句不再变宽；
+        # 用户拖拽改宽后这里同步成新宽度，下次翻句保持不变
+        self._one_line_w = None
 
         # 奶读模式：奶蛙是**独立悬浮窗**（像音乐软件的桌面歌词），
         # 主窗照常看书。这里只保留「谁在念、念到第几句」这类业务状态。
@@ -811,17 +831,35 @@ class Reader(QWidget):
         return super().eventFilter(obj, ev)
 
     def _handle_one_line_key(self, key) -> bool:
-        """单行模式的翻句键。返回 True 表示已经处理掉。
+        """单行模式的键盘操作。返回 True 表示已经处理掉。
+
+        - ↑ / ↓：切上一句 / 下一句（顺着章节边界翻章）
+        - ← / →（以及 PageUp / PageDown）：横向滚动这一行超宽的正文
+        - Space：下一句
+        - Home / End：跳到本章首句 / 尾句
 
         方向键在 QTextEdit 里只是移动光标（这里只有一句，动了也看不出来），
         所以必须拦下来自己处理。
         """
-        if key in (Qt.Key.Key_Down, Qt.Key.Key_Right,
-                   Qt.Key.Key_Space, Qt.Key.Key_PageDown):
+        sb = self.view.horizontalScrollBar()
+        if key == Qt.Key.Key_Up:
+            self._step_one_line(-1)
+            return True
+        if key == Qt.Key.Key_Down:
             self._step_one_line(1)
             return True
-        if key in (Qt.Key.Key_Up, Qt.Key.Key_Left, Qt.Key.Key_PageUp):
-            self._step_one_line(-1)
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp,
+                   Qt.Key.Key_Right, Qt.Key.Key_PageDown):
+            # 内容没超宽就没得滚，直接吞掉按键（别让光标在单行里乱跳）
+            if sb.maximum() > 0:
+                step = max(40, int(self.view.viewport().width() * 0.2))
+                if key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
+                    sb.setValue(sb.value() - step)
+                else:
+                    sb.setValue(sb.value() + step)
+            return True
+        if key == Qt.Key.Key_Space:
+            self._step_one_line(1)
             return True
         if key == Qt.Key.Key_Home and self._tts_sentences:
             self._one_line_idx = 0
@@ -1179,12 +1217,16 @@ class Reader(QWidget):
 
     def mouseReleaseEvent(self, ev):
         moved = self._resizing or self._drag_origin is not None
+        was_resizing = self._resizing
         self._resizing = False
         self._drag_origin = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.header.setCursor(Qt.CursorShape.OpenHandCursor)
         if moved:
             self._save_geometry()
+        # 一行模式拖右下角改了宽度：把新宽度记下来，下次翻句保持固定
+        if was_resizing and self._one_line:
+            self._one_line_w = self.width()
         ev.accept()
 
     def wheelEvent(self, ev):
@@ -2048,6 +2090,7 @@ class Reader(QWidget):
             0.0 if sb.maximum() == 0 else sb.value() / sb.maximum())
         self._normal_geo = self.geometry()
         self._one_line = True
+        self._one_line_w = None        # 进入时复位，让默认宽按当前句重新算一次
         self._one_line_idx = self._current_sentence_index()
         self.header.hide()
         self.footer.hide()
@@ -2056,6 +2099,8 @@ class Reader(QWidget):
         # 留一条 TOOL_BAND 高的带给它浮着，正文最后一行就不会被压住
         self._one_line_tools.activate()
         self.view.setViewportMargins(0, 0, 0, one_line_tools.TOOL_BAND)
+        # 横向滚动条做细的样式只在一行模式铺上，退出时还原成常规态
+        self.view.setStyleSheet(VIEW_ONELINE_SS)
         # 从朗读句起显示，而不是重新算——否则进来会跳一句
         if self._tts_sentences:
             self._paint_one_line(self._tts_sentences[self._one_line_idx])
@@ -2107,6 +2152,12 @@ class Reader(QWidget):
 
         self._one_line = False
         self._one_line_tools.suspend()
+        self._one_line_w = None
+        # 还原成正文阅读态：常规 QSS、按窗口宽度折行、关掉横向滚动条
+        self.view.setStyleSheet(VIEW_BASE_SS)
+        self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setViewportMargins(0, 0, 0, 0)
         # setFixedSize 会同时锁住 min/max，不解除的话下面的 setGeometry 无效
         self.setMinimumSize(320, 120)
@@ -2144,9 +2195,10 @@ class Reader(QWidget):
     def _paint_one_line(self, text: str | None = None):
         """一行模式下重排尺寸和文字。字号变了也要调一次。
 
-        宽度按句子实际长度自适应：短句窗口就窄，长句才铺开，这样多数情况
-        真的只有一行。cols 只当上下限的参考——固定宽度会让长句折成两行，
-        那就不像「一行」了。
+        宽度是**固定**的：进入时按当前这句算一次默认宽（夹在 ONELINE_MIN_W..
+        MAX_W），之后每句都沿用，点下一句不再变宽；用户用鼠标拖右下角改的宽
+        也会记下来、下次翻句保持。句子比窗口长时**不折行**，而是出一条横向
+        细滚动条（方向键左右滚），所以始终是「一行」。
 
         text 由 _on_sentence 传进来：那一刻文档已经只剩一句，
         _visible_sentence_index() 在这种状态下取不准。
@@ -2157,39 +2209,54 @@ class Reader(QWidget):
         font = self._make_font(int(self.st.get("font.size",
                                                 store.DEFAULT_CONFIG["font"]["size"])))
         fm = QFontMetrics(font)
-        unit = fm.horizontalAdvance("中")
-        # 余量给适中：horizontalAdvance 对标点、半角数字会略微低估，差几像素
-        # 就会折成两行；给太多又会把窗口撑宽、右边留一大片空白
-        pad = 28
-        need = fm.horizontalAdvance(text) + pad
-        # 下限只保按钮放得下（工具条自己有最小宽，窗口不必为了它变宽）
-        lo = max(unit * 6 + pad, one_line_tools.TOOL_MIN_W)
-        # 上限：长到一行装不下这句为止；再长就让它折行，而不是铺满屏幕
-        hi = unit * max(cols, 18) * 2 + pad
-        screen = QApplication.primaryScreen().availableGeometry().width() - 80
-        width = max(lo, min(need, hi, screen))
-        self.setFixedWidth(int(width))
 
         # 先定字体再换文本，确保这一句没有被上一次的字符格式带脏
         self.view.document().setDefaultFont(font)
         self.view.setFont(font)
         self.view.setCurrentCharFormat(QTextCharFormat())
+        # 不折行：一句始终排在一行上，太长就靠横向滚动条看，而不是断成两行
+        self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.view.setPlainText(text)
         self.view.setExtraSelections([])
         self._tts_base = 0
         self._hl_tts = None
         self._hl_search = []
 
-        # 高度交给文档自己算：不同字号/行距下估算值总会差一点，
-        # 差一点就会把最后一行裁掉
+        # 高度交给文档自己算：单行模式只用一行，不同字号/行距下估算值会差一点
         doc_h = self.view.document().size().height()
         # 多出来的 TOOL_BAND 全给工具带：正文的可用高度跟从前一样，
         # 最后一行不会被压掉
-        self.setFixedHeight(max(34, int(doc_h) + 14)
-                            + one_line_tools.TOOL_BAND)
+        h = max(34, int(doc_h) + 14) + one_line_tools.TOOL_BAND
+
+        # 宽度：只在第一句（本会话）定一次，其余沿用当前宽度（可能已被拖拽改过）
+        if self._one_line_w is None:
+            unit = fm.horizontalAdvance("中")
+            pad = 28
+            screen = QApplication.primaryScreen().availableGeometry().width() - 80
+            # 按本章最长一句定默认宽：大多数句子都能在一行里看到，只有最长的
+            # 才走横滚；夹在 ONELINE_MIN_W..MAX_W 之间，进入时窗口稳定、
+            # 点下一句不再变宽
+            longest = max((fm.horizontalAdvance(s) for s in self._tts_sentences),
+                          default=0)
+            want = longest + pad
+            hi = unit * max(cols, 18) * 2 + pad
+            self._one_line_w = int(max(ONELINE_MIN_W,
+                                       min(want, hi, ONELINE_MAX_W, screen)))
+            # 允许鼠标拖右下角改宽：只锁高度，宽度放开到屏幕量级
+            self.setMinimumWidth(ONELINE_MIN_W)
+            self.setMaximumWidth(screen + 80)
+        else:
+            # 沿用当前实际宽度（用户拖拽改过的会被这里收进来）
+            self._one_line_w = self.width()
+        self.setFixedHeight(h)                      # 锁高度成「一条」的矮窗
+        self.resize(self._one_line_w, h)            # 定宽（不锁宽，留给拖拽）
+
         # 工具条浮层摆到窗口底部居中
         self._one_line_tools.relayout(self.width(), self.height())
-        # 一条字幕不需要滚动条，多出来的那几个像素会挤出一条不能拖的条
+        # 横向：内容超宽才出细滚动条（样式在 _enter_one_line 里铺好）；
+        # 纵向：一条字幕不需要竖条，多出来的那几个像素会挤出一条不能拖的条
+        self.view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._one_line_sync()

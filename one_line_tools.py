@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import QToolTip, QWidget
 
 import pet
+import theme
 
 TOOL_BTN = 22
 TOOL_GAP = 6
@@ -228,6 +229,15 @@ class OneLineTools(QWidget):
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setOpacity(self._alpha)
+            # 一条贯通全宽的圆角胶囊底：把按钮们包成一颗浮在正文下方的
+            # 独立小条，和正文之间留着 TOOL_BAND 的间隙，视觉上彻底脱离面板
+            cap = QRectF(1, 1, self.width() - 2, self.height() - 2)
+            bg = QColor(self.st.get("colors.bg", "#0d0f12"))
+            bg.setAlpha(max(1, min(255, int(self.st.get("bg_alpha", 236)))))
+            p.setPen(QPen(theme.overlay_pen(self.st, 44), 1.0))
+            p.setBrush(bg)
+            p.drawRoundedRect(cap, cap.height() / 2, cap.height() / 2)
+            # 按钮直接画在胶囊上（只画图标，hover 才提亮），不再各带一块底片
             rects = self.layout_buttons()
             try:
                 playing, _prog = self._state()
@@ -235,19 +245,15 @@ class OneLineTools(QWidget):
                 playing = False
             for k, r in rects.items():
                 pet.draw_tool_button(p, r, k, self.st,
-                                     hover=(k == self._hover), playing=playing)
+                                     hover=(k == self._hover), playing=playing,
+                                     surface=False)
+            # 进度标直接画在胶囊上（不另起底片），画不下就干脆不画
             pr, txt = self.progress_label(rects)
             if not pr.isEmpty():
-                bg = QColor(self.st.get("colors.bg", "#0d0f12"))
-                bg.setAlpha(180)
                 fg = QColor(self.st.get("colors.fg", "#c3cbd6"))
-                fg.setAlpha(185)
+                fg.setAlpha(200)
                 f = QFont(self.font())
                 f.setPixelSize(PROGRESS_PX)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(bg)
-                p.drawRoundedRect(
-                    QRectF(pr).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
                 p.setFont(f)
                 p.setPen(fg)
                 p.drawText(pr, Qt.AlignmentFlag.AlignCenter, txt)
