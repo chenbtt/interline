@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, QRectF, QSize, Qt
@@ -35,6 +36,14 @@ BASE_STATES = (IDLE, READING, RUNNING, THINKING)
 # 摸一下蛙时的随机反应。朗读时**不用**吐舌那套：它张着嘴大笑的表情放在
 # 念书的旁边很出戏，只有用户主动点它才播，播完回朗读/发呆
 POKE_ACTS = (JUMPING, TONGUE)
+# 各自概率（和 POKE_ACTS 一一对应）：跳一下 80%，吐舌 20%。
+# 吐舌更「跳脱」，常年高频出现会腻，压到两成当点缀。
+POKE_WEIGHTS = (80, 20)
+
+
+def poke_act() -> str:
+    """按权重抽一个点蛙反应：跳一下 80%，吐舌 20%。"""
+    return random.choices(POKE_ACTS, weights=POKE_WEIGHTS, k=1)[0]
 
 # 精灵表里所有该有帧的动画名。自检拿它跟 manifest 对账，
 # 新增一套忘了建行，这里会当场报出来

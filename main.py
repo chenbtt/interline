@@ -29,6 +29,7 @@ import book_parser
 import hotkey
 import library_view
 import logo
+import one_line_tools
 import pet
 import pet_window
 import settings_dialog
@@ -42,7 +43,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 66
+BUILD_VERSION = 67
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -617,6 +618,13 @@ class Reader(QWidget):
         self.view_btn.setVisible(False)
         self.view_btn.clicked.connect(self._toggle_library_view)
         fl.addWidget(self.view_btn)
+        # 一行模式的悬浮工具带：藏在布局里，只有进一行模式才放出来。
+        # 放在 stack 与 footer 之间，正文自然少占 28px，不用另设视口边距
+        self._one_line_tools = one_line_tools.OneLineTools(
+            self.st, self._one_line_state)
+        self._one_line_tools.setVisible(False)
+        self._one_line_tools.triggered.connect(self._on_one_line_tool)
+        root.addWidget(self._one_line_tools)
         root.addWidget(self.footer)
 
         # 信号
@@ -843,6 +851,11 @@ class Reader(QWidget):
     def set_mode(self, mode: str):
         if mode == self.mode:
             return
+        # 一行模式的窗口只有一句话高，书库/目录塞不进去；Ctrl+L 之类的
+        # 快捷键在一行模式下照样能触发，先退回正常窗口再切视图。
+        # _exit_one_line 开头就把 _one_line 置 False，不会递归回来
+        if self._one_line and mode != "read":
+            self._exit_one_line()
         # 切走前先落盘，否则 700ms 防抖窗口内的滚动位置会丢
         self._flush_progress()
         if self.font_panel is not None:
@@ -1968,6 +1981,42 @@ class Reader(QWidget):
         else:
             self._enter_one_line()
 
+    # -------------------------------------------------- 一行模式的悬浮工具带
+
+    def _one_line_state(self):
+        """工具带画的时候现取：播放图标 + 章节进度。
+
+        进度按「当前第几句 / 本章共几句」算，不用滚动条比例——一行模式
+        把滚动条关了，那个比例恒为 0，奶读气泡上那个 0% 就是这么来的。
+        """
+        playing = bool(self.speech.running and not self.speech.paused)
+        if not self.book:
+            return playing, None
+        n = len(self._tts_sentences)
+        pct = int(self._one_line_idx * 100 / max(1, n)) if n else 0
+        return playing, (pct, self.chapter_idx + 1,
+                         len(self.book.chapters))
+
+    def _one_line_sync(self):
+        """朗读状态/换句变了，让工具带重画一次（图标与进度标）。"""
+        w = getattr(self, "_one_line_tools", None)
+        if self._one_line and w is not None:
+            w.update()
+
+    def _on_one_line_tool(self, kind: str):
+        if not self._one_line:
+            return
+        if kind == "prev":
+            self._step_one_line(-1)
+        elif kind == "next":
+            self._step_one_line(1)
+        elif kind == "play":
+            self._toggle_speech()
+        elif kind == "hide":
+            self._hide_window()
+        elif kind == "main":
+            self._exit_one_line()
+
     def _enter_one_line(self):
         if not self.book:
             return
@@ -1981,6 +2030,9 @@ class Reader(QWidget):
         self.header.hide()
         self.footer.hide()
         self.search_bar.hide()
+        # 先把工具带放进布局，再重排尺寸——否则 setFixedHeight 算不出
+        # 正文该少多少，句子最下面一行会被工具带压掉
+        self._one_line_tools.setVisible(True)
         # 从朗读句起显示，而不是重新算——否则进来会跳一句
         if self._tts_sentences:
             self._paint_one_line(self._tts_sentences[self._one_line_idx])
@@ -2029,6 +2081,7 @@ class Reader(QWidget):
                     if 0 <= idx < len(self._tts_offsets) else None)
 
         self._one_line = False
+        self._one_line_tools.setVisible(False)
         # setFixedSize 会同时锁住 min/max，不解除的话下面的 setGeometry 无效
         self.setMinimumSize(320, 120)
         self.setMaximumSize(16777215, 16777215)
@@ -2086,7 +2139,8 @@ class Reader(QWidget):
         lo = unit * max(8, cols // 2) + pad      # 太窄看着像根棍子
         hi = unit * cols * 2 + pad               # 太长就别铺满屏幕
         screen = QApplication.primaryScreen().availableGeometry().width() - 120
-        width = max(lo, min(need, hi, screen))
+        # 五颗按钮本身要 142px，句子再短也不能把窗口收得比它还窄
+        width = max(lo, min(need, hi, screen), one_line_tools.TOOL_MIN_W)
         self.setFixedWidth(int(width))
 
         # 先定字体再换文本，确保这一句没有被上一次的字符格式带脏
@@ -2102,10 +2156,14 @@ class Reader(QWidget):
         # 高度交给文档自己算：不同字号/行距下估算值总会差一点，
         # 差一点就会把最后一行裁掉
         doc_h = self.view.document().size().height()
-        self.setFixedHeight(max(34, int(doc_h) + 14))
+        # 多出来的 TOOL_BAND 全给工具带：正文的可用高度跟从前一样，
+        # 最后一行不会被压掉
+        self.setFixedHeight(max(34, int(doc_h) + 14)
+                            + one_line_tools.TOOL_BAND)
         # 一条字幕不需要滚动条，多出来的那几个像素会挤出一条不能拖的条
         self.view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._one_line_sync()
 
     # -------------------------------------------------- 奶读模式
 
@@ -2273,6 +2331,9 @@ class Reader(QWidget):
 
     def _pet_sync_base(self):
         """朗读状态 → 悬浮窗的持续动作。"""
+        # 一行模式的工具带也要跟着换播放图标；放在早退之前，
+        # 没开奶读时同样要刷新
+        self._one_line_sync()
         if not self._pet:
             return
         if self.speech.running and not self.speech.paused:
@@ -2782,7 +2843,7 @@ def selftest() -> int:
 
             # 点蛙反应池：两套都得能抽到（抽不到说明常量写错了），
             # 而且吐舌不能被写进 AMBIENT_ACTS —— 朗读中自己蹦出来很出戏
-            seen = {random.choice(pet_mod.POKE_ACTS) for _ in range(200)}
+            seen = {pet_mod.poke_act() for _ in range(200)}
             ok_poke = (seen == set(pet_mod.POKE_ACTS)
                        and pet_mod.TONGUE not in pet_mod.AMBIENT_ACTS)
             log(f"pet poke  = 点蛙反应 {sorted(seen)} / 朗读小动作里没有吐舌 "
@@ -3846,6 +3907,177 @@ def toolcheck() -> int:
         ok = win._progress_label(win._toolbar()[0])[0].isEmpty()
         rc |= 0 if ok else 2
         log(f"  无书时不出进度标 {ok} {'ok' if ok else '??'}")
+
+        # ---- v67：一行模式的悬浮工具带
+        # 只画这个控件，不构造真 Reader —— Reader.__init__ 会拉起朗读链路，
+        # 跟上面这一堆 QPixmap / grab 混在一个进程里跑不稳。
+        # 主窗接线单独用鸭子对象调未绑定方法，同样不碰 Qt 对象构造。
+        try:
+            import one_line_tools as olt
+
+            from PyQt6.QtGui import QMouseEvent
+            state = {"playing": True, "prog": (42, 3, 12)}
+            band = olt.OneLineTools(st, lambda: (state["playing"],
+                                                 state["prog"]))
+            band.hide()
+            band.resize(360, olt.TOOL_BAND)
+            rs = band.layout_buttons()
+            ids = tuple(rs)
+            want = olt.LEFT + olt.RIGHT
+            ok = ids == want
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 五颗按钮 {ids} {'ok' if ok else '?? 期望 ' + str(want)}")
+
+            # 左三右二按序排开、互不重叠、全部落在带内
+            ordered = all(rs[a].right() < rs[b].left()
+                          for a, b in zip(ids, ids[1:]))
+            frame = QRect(0, 0, band.width(), band.height())
+            inside = all(frame.contains(r) for r in rs.values())
+            minw_ok = (olt.TOOL_MIN_W >=
+                       len(want) * olt.TOOL_BTN
+                       + (len(olt.LEFT) - 1 + len(olt.RIGHT) - 1)
+                       * olt.TOOL_GAP + 2 * olt.TOOL_INSET)
+            ok = ordered and inside and minw_ok
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 顺序{ordered} 带内{inside} "
+                f"最小宽够用{minw_ok} {'ok' if ok else '??'}")
+
+            # 命中：五个中心各归各位，中间空白谁也不吃
+            hits = {k: band.tool_at(r.center()) for k, r in rs.items()}
+            ok = (all(v == k for k, v in hits.items())
+                  and band.tool_at(QPoint(band.width() // 2,
+                                          olt.TOOL_Y_GAP + 2)) == "")
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 命中 {hits} 空白不误命中 "
+                f"{'ok' if ok else '??'}")
+
+            # 进度标：文案带百分比，不压任何按钮
+            lab, ptext = band.progress_label(rs)
+            ok = (not lab.isEmpty() and "42%" in ptext and frame.contains(lab)
+                  and not any(lab.intersects(r) for r in rs.values()))
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 进度标 {ptext!r} 不压按钮 "
+                f"{'ok' if ok else '??'}")
+
+            # 真画出来：开关进度标，那块底片得有像素变化
+            with_img = band.grab().toImage()
+            state["prog"] = None
+            QApplication.processEvents()
+            without_img = band.grab().toImage()
+            pdiff = sum(1 for y in range(lab.top(), lab.bottom() + 1)
+                        for x in range(lab.left(), lab.right() + 1)
+                        if with_img.pixel(x, y) != without_img.pixel(x, y))
+            state["prog"] = (42, 3, 12)
+            ok = pdiff >= 30
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 进度标真的画出来 {pdiff} 像素 "
+                f"{'ok' if ok else '??'}")
+
+            # 播放图标跟着朗读状态换：只比较 play 那颗按钮的范围
+            prect = rs["play"]
+            play_img = band.grab().toImage()
+            state["playing"] = False
+            QApplication.processEvents()
+            pause_img = band.grab().toImage()
+            idiff = sum(1 for y in range(prect.top(), prect.bottom() + 1)
+                        for x in range(prect.left(), prect.right() + 1)
+                        if play_img.pixel(x, y) != pause_img.pixel(x, y))
+            state["playing"] = True
+            ok = idiff >= 8
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 播放/暂停图标有区别 {idiff} 像素 "
+                f"{'ok' if ok else '??'}")
+
+            # 真鼠标链：按下→松开触发一次；按在空白上要 ignore 掉让主窗拖窗
+            from PyQt6.QtCore import QPointF
+
+            def osend(t, pos, btn=Qt.MouseButton.NoButton,
+                      buttons=Qt.MouseButton.NoButton):
+                ev = QMouseEvent(t, QPointF(pos), QPointF(pos), btn, buttons,
+                                 Qt.KeyboardModifier.NoModifier)
+                QApplication.sendEvent(band, ev)
+                return ev.isAccepted()
+
+            got = []
+            band.triggered.connect(got.append)
+            c = rs["next"].center()
+            pressed = osend(QEvent.Type.MouseButtonPress, c,
+                            Qt.MouseButton.LeftButton,
+                            Qt.MouseButton.LeftButton)
+            osend(QEvent.Type.MouseButtonRelease, c,
+                  Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+            blank = osend(QEvent.Type.MouseButtonPress,
+                          QPoint(band.width() // 2, olt.TOOL_Y_GAP + 2),
+                          Qt.MouseButton.LeftButton,
+                          Qt.MouseButton.LeftButton)
+            osend(QEvent.Type.MouseButtonRelease,
+                  QPoint(band.width() // 2, olt.TOOL_Y_GAP + 2),
+                  Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+            ok = pressed and tuple(got) == ("next",) and not blank
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 真鼠标链 按下{pressed} 发出{got} "
+                f"空白让出{not blank} {'ok' if ok else '??'}")
+
+            # 收到最窄宽度：按钮照样齐全，进度标退化或不画，谁都不许叠
+            band.resize(olt.TOOL_MIN_W, olt.TOOL_BAND)
+            rs2 = band.layout_buttons()
+            frame2 = QRect(0, 0, band.width(), band.height())
+            lab2, pt2 = band.progress_label(rs2)
+            ok2 = (all(frame2.contains(r) for r in rs2.values())
+                   and all(rs2[a].right() < rs2[b].left()
+                           for a, b in zip(tuple(rs2), tuple(rs2)[1:]))
+                   and not any(lab2.intersects(r) for r in rs2.values()))
+            rc |= 0 if ok2 else 2
+            log(f"  一行工具带 {olt.TOOL_MIN_W}px 极窄 进度标"
+                f"{repr(pt2) if pt2 else '不画'} 按钮不叠 {ok2} "
+                f"{'ok' if ok2 else '??'}")
+
+            # 主窗接线：不构造 Reader，鸭子对象直接调未绑定方法
+            calls = []
+
+            class _FakeReader:
+                _one_line = True
+
+                def _step_one_line(self, d): calls.append(("step", d))
+                def _toggle_speech(self): calls.append(("play",))
+                def _hide_window(self): calls.append(("hide",))
+                def _exit_one_line(self): calls.append(("main",))
+
+            fake = _FakeReader()
+            for k in want:
+                Reader._on_one_line_tool(fake, k)
+            ok = calls == [("step", -1), ("play",), ("step", 1),
+                           ("hide",), ("main",)]
+            fake._one_line = False
+            Reader._on_one_line_tool(fake, "next")
+            ok = ok and len(calls) == 5
+            rc |= 0 if ok else 2
+            log(f"  一行工具带 主窗接线 {calls} 非一行模式不响应 "
+                f"{'ok' if ok else '??'}")
+
+            # 出图：给 README 一行模式那节引用
+            band.resize(360, olt.TOOL_BAND)
+            QApplication.processEvents()
+            pm = band.grab()
+            canvas = QImage(pm.width() + 40, pm.height() + 40,
+                            QImage.Format.Format_RGB32)
+            canvas.fill(QColor("#12161b"))
+            pc = QPainter(canvas)
+            pc.drawPixmap(20, 20, pm)
+            pc.end()
+            shot = here / "screenshots" / "one-line-tools.png"
+            shot = shot if shot.parent.is_dir() else (
+                Path(tempfile.gettempdir()) / "interline_one_line_tools.png")
+            saved = bool(canvas.save(str(shot)))
+            rc |= 0 if saved else 2
+            log(f"  一行工具带 预览 {shot} {'ok' if saved else '?? 保存失败'}")
+            band.deleteLater()
+        except Exception as e:
+            import traceback
+            log(f"  一行工具带 FAIL {type(e).__name__}: {e}")
+            log(traceback.format_exc())
+            rc |= 2
+
         log("RESULT = OK")
     except Exception as e:
         import traceback

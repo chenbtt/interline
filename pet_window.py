@@ -19,7 +19,6 @@
 """
 from __future__ import annotations
 
-import random
 import time
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -804,6 +803,8 @@ class PetWindow(QWidget):
         clip, cooldown = "", 0
         if name == pet.JUMPING:
             clip, cooldown = pet_audio.LAUGH, 2000
+        elif name == pet.TONGUE:
+            clip = pet_audio.ANDI          # 吐舌配「安迪」那条声音
         elif name in (pet.WAVING, pet.IDLE):
             clip = pet_audio.PetAudio.random_voice()
 
@@ -813,11 +814,14 @@ class PetWindow(QWidget):
             if audio is not None and audio.play(clip, cooldown_ms=cooldown):
                 hold = float(audio.duration(clip))
                 self.sound_started.emit(int(hold))
+
         if name == pet.TONGUE:
-            # 吐舌没有音效，但兜底算式会给到 3.5 秒（7 帧 × 3 轮），
-            # 那个长度已经不像「反应一下」而像卡住了。只播一个完整循环多点余量。
-            n = len(self.sprite.frames(name)) or 7
-            hold = 1000.0 / max(1, self.sprite.fps(name)) * n * 1.2
+            # 有音效就跟着音效时长走（andi 约 2 秒），声音播完动画正好收；
+            # 静音/素材缺失时才退回「一个完整循环多点余量」——
+            # 不要用兜底的 3.5 秒（7 帧 × 3 轮），那长度看着像卡住了。
+            if hold <= 0:
+                n = len(self.sprite.frames(name)) or 7
+                hold = 1000.0 / max(1, self.sprite.fps(name)) * n * 1.2
         elif hold <= 0:
             n = len(self.sprite.frames(name)) or 4
             hold = 1000.0 / max(1, self.sprite.fps(name)) * n * 3
@@ -1179,7 +1183,8 @@ class PetWindow(QWidget):
                 self.bubble_clicked.emit()
             else:
                 # 摸它一下：随机给个反应，跳一下笑一声，或者吐个舌头
-                self.fx(random.choice(pet.POKE_ACTS))
+                # （跳 80% / 吐舌 20%，由 pet.poke_act 统一控制）
+                self.fx(pet.poke_act())
         elif hit == "bubble":
             self.bubble_clicked.emit()
         ev.accept()

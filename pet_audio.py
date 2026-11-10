@@ -16,6 +16,8 @@ import assets
 
 LAUGH = "laugh.mp3"
 VOICES = ("voice_01.mp3", "voice_02.mp3", "voice_03.mp3", "voice_04.mp3")
+# 「安迪」那条，吐舌时专用（源素材 voice/andi (1).mp3，见 make_pet_sheet.SFX_MAP）
+ANDI = "voice_04.mp3"
 
 # 读不到时长时的兜底，别让动画 hold 变成 0
 FALLBACK_MS = 1500
