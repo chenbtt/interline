@@ -14,8 +14,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
                           QTimer, pyqtSignal)
-from PyQt6.QtGui import (QAction, QColor, QFont, QFontInfo, QFontMetrics, QIcon,
-                         QImage, QKeySequence, QPainter, QPainterPath, QPen,
+from PyQt6.QtGui import (QAction, QColor, QCursor, QFont, QFontInfo, QFontMetrics,
+                         QIcon, QImage, QKeySequence, QPainter, QPainterPath,
+                         QPen,
                          QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat,
                          QTextCursor, qAlpha)
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -43,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 67
+BUILD_VERSION = 68
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -618,13 +619,13 @@ class Reader(QWidget):
         self.view_btn.setVisible(False)
         self.view_btn.clicked.connect(self._toggle_library_view)
         fl.addWidget(self.view_btn)
-        # 一行模式的悬浮工具带：藏在布局里，只有进一行模式才放出来。
-        # 放在 stack 与 footer 之间，正文自然少占 28px，不用另设视口边距
+        # 一行模式的悬浮工具带：绝对定位的浮层（不进布局），只有进一行模式
+        # 才激活。平时藏在窗口底部透明带里、鼠标穿透；指上窗口才淡入，
+        # 跟奶读气泡那排按钮的交互手感一致。
         self._one_line_tools = one_line_tools.OneLineTools(
-            self.st, self._one_line_state)
-        self._one_line_tools.setVisible(False)
+            self.st, self._one_line_state, self)
         self._one_line_tools.triggered.connect(self._on_one_line_tool)
-        root.addWidget(self._one_line_tools)
+        self._one_line_tools.installEventFilter(self)
         root.addWidget(self.footer)
 
         # 信号
@@ -760,6 +761,17 @@ class Reader(QWidget):
                                 g.x(), g.y(), self._normal_geo.width(),
                                 self._normal_geo.height())
                         return True
+        # 一行模式：鼠标指上窗口淡入工具条，移开淡出（和奶读一致）。
+        # 工具条是窗口内的浮层子控件；从正文划到工具条不算「离开窗口」，
+        # 所以离开时还要确认光标确实出了窗口范围才淡出，免得自己闪自己。
+        if self._one_line and obj in (self.view, self.view.viewport(),
+                                      self._one_line_tools):
+            t = ev.type()
+            if t == QEvent.Type.Enter:
+                self._one_line_tools.fade_in()
+            elif t == QEvent.Type.Leave:
+                if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+                    self._one_line_tools.fade_out()
         if ev.type() == QEvent.Type.Wheel and obj is self.view.viewport():
             # Ctrl+滚轮调字号。必须拦下来：QTextEdit 自带 zoomInF 会绕过
             # _render 直接改文档字体，导致标题(绝对字号)不跟随、缩进错位。
@@ -1127,6 +1139,16 @@ class Reader(QWidget):
     def _edge_hit(self, pos: QPoint) -> bool:
         return (pos.x() >= self.width() - RESIZE_MARGIN
                 and pos.y() >= self.height() - RESIZE_MARGIN)
+
+    def moveEvent(self, ev):
+        if self._one_line:
+            self._one_line_tools.relayout(self.width(), self.height())
+        super().moveEvent(ev)
+
+    def resizeEvent(self, ev):
+        if self._one_line:
+            self._one_line_tools.relayout(self.width(), self.height())
+        super().resizeEvent(ev)
 
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
@@ -2030,14 +2052,17 @@ class Reader(QWidget):
         self.header.hide()
         self.footer.hide()
         self.search_bar.hide()
-        # 先把工具带放进布局，再重排尺寸——否则 setFixedHeight 算不出
-        # 正文该少多少，句子最下面一行会被工具带压掉
-        self._one_line_tools.setVisible(True)
+        # 工具条是浮层：先激活（让它能接收鼠标、参与淡入），正文视口底部
+        # 留一条 TOOL_BAND 高的带给它浮着，正文最后一行就不会被压住
+        self._one_line_tools.activate()
+        self.view.setViewportMargins(0, 0, 0, one_line_tools.TOOL_BAND)
         # 从朗读句起显示，而不是重新算——否则进来会跳一句
         if self._tts_sentences:
             self._paint_one_line(self._tts_sentences[self._one_line_idx])
         else:
             self._paint_one_line()
+        # 进来时鼠标一般就悬在窗口上，直接淡入
+        self._one_line_tools.fade_in()
         self._set_hint("", 0)
 
     def _step_one_line(self, delta: int):
@@ -2081,7 +2106,8 @@ class Reader(QWidget):
                     if 0 <= idx < len(self._tts_offsets) else None)
 
         self._one_line = False
-        self._one_line_tools.setVisible(False)
+        self._one_line_tools.suspend()
+        self.view.setViewportMargins(0, 0, 0, 0)
         # setFixedSize 会同时锁住 min/max，不解除的话下面的 setGeometry 无效
         self.setMinimumSize(320, 120)
         self.setMaximumSize(16777215, 16777215)
@@ -2132,15 +2158,16 @@ class Reader(QWidget):
                                                 store.DEFAULT_CONFIG["font"]["size"])))
         fm = QFontMetrics(font)
         unit = fm.horizontalAdvance("中")
-        # 余量给大一点：horizontalAdvance 对标点、半角数字会略微低估，
-        # 差几像素就会折成两行
-        pad = 62
+        # 余量给适中：horizontalAdvance 对标点、半角数字会略微低估，差几像素
+        # 就会折成两行；给太多又会把窗口撑宽、右边留一大片空白
+        pad = 28
         need = fm.horizontalAdvance(text) + pad
-        lo = unit * max(8, cols // 2) + pad      # 太窄看着像根棍子
-        hi = unit * cols * 2 + pad               # 太长就别铺满屏幕
-        screen = QApplication.primaryScreen().availableGeometry().width() - 120
-        # 五颗按钮本身要 142px，句子再短也不能把窗口收得比它还窄
-        width = max(lo, min(need, hi, screen), one_line_tools.TOOL_MIN_W)
+        # 下限只保按钮放得下（工具条自己有最小宽，窗口不必为了它变宽）
+        lo = max(unit * 6 + pad, one_line_tools.TOOL_MIN_W)
+        # 上限：长到一行装不下这句为止；再长就让它折行，而不是铺满屏幕
+        hi = unit * max(cols, 18) * 2 + pad
+        screen = QApplication.primaryScreen().availableGeometry().width() - 80
+        width = max(lo, min(need, hi, screen))
         self.setFixedWidth(int(width))
 
         # 先定字体再换文本，确保这一句没有被上一次的字符格式带脏
@@ -2160,6 +2187,8 @@ class Reader(QWidget):
         # 最后一行不会被压掉
         self.setFixedHeight(max(34, int(doc_h) + 14)
                             + one_line_tools.TOOL_BAND)
+        # 工具条浮层摆到窗口底部居中
+        self._one_line_tools.relayout(self.width(), self.height())
         # 一条字幕不需要滚动条，多出来的那几个像素会挤出一条不能拖的条
         self.view.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -3919,8 +3948,10 @@ def toolcheck() -> int:
             state = {"playing": True, "prog": (42, 3, 12)}
             band = olt.OneLineTools(st, lambda: (state["playing"],
                                                  state["prog"]))
-            band.hide()
+            band.show()
             band.resize(360, olt.TOOL_BAND)
+            band._force_visible()       # 自检跳过淡入，直接全亮方便抓图比对
+            band.activate()             # 真鼠标链要收事件，得先激活
             rs = band.layout_buttons()
             ids = tuple(rs)
             want = olt.LEFT + olt.RIGHT
