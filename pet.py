@@ -618,6 +618,18 @@ def _tool_glyph(p: QPainter, rect: QRect, kind: str,
                            1.8 * s, 1.8 * s)
         p.drawPath(box)
         line((4.5, 9), (17.5, 9))
+    elif kind == "font":                     # 字号：描一个 A
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        line((7.2, 17.2), (11, 5))
+        line((11, 5), (14.8, 17.2))
+        line((8.6, 12.8), (13.4, 12.8))
+    elif kind == "oneline":                  # 一行模式：单行文本框 + 中间一条线
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        box = QPainterPath()
+        box.addRoundedRect(QRectF(X(4.2), Y(7), 13.6 * s, 8 * s),
+                           1.6 * s, 1.6 * s)
+        p.drawPath(box)
+        line((6.6, 11), (15.4, 11))
 
 
 def draw_tool_button(p: QPainter, rect: QRect, kind: str, st,

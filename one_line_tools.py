@@ -1,25 +1,22 @@
-"""一行模式的悬浮工具带。
+"""一行模式的悬浮工具带（独立浮窗）。
 
 和奶读气泡那排按钮共用 `pet.draw_tool_button` / `TOOL_IDS`，所以两套界面
 的按钮是同一家人：同样的圆角底片、同样的线描图标、同样跟着主题走。
 
-和 v67 那版不同：这一版**不进布局、不铺满窗口**——它是 Reader 里一个绝对
-定位的子控件，宽度自己定（紧凑、居中、不随正文拉伸），平时藏在窗口底部的
-透明带里，只有鼠标指上窗口才淡入，移开淡出。这样：
+v70 起它**不再是主窗里的子控件**，而是跟奶读窗一个路子的**独立浮窗**
+（`Qt.Tool` + 无边框 + 真透明），落在一行模式面板**正下方**（留一道小缝），
+真正脱离面板：面板只负责显示那一行字，工具带是它下面一颗独立浮着的小条，
+鼠标从面板划下去就能碰到它。
 
-- 「脱离面板」：它是一条浮在正文下方的独立小条，不再把整扇窗口撑成一条
-  全宽的工具栏，正文窗口可以收得很窄；
-- 「和奶蛙一致」：淡入淡出、移开留 180ms 宽限，都照搬 pet_window 的那套
-  参数，鼠标交互手感跟奶读气泡的工具条一样。
-
-宽度算法因此也变了：一行模式窗口的宽度不再需要为工具条留下限，正文多窄
-窗口就多窄（按钮有自己最小宽，工具条窄到放不下进度标就只留按钮）。
+位置由主窗在 `_paint_one_line` / `moveEvent` / `resizeEvent` 里调 `place_below`
+跟着面板走；淡入淡出、移开留宽限，照搬 pet_window 那套参数，和奶读气泡的
+工具条手感一致。
 """
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
-from PyQt6.QtWidgets import QToolTip, QWidget
+from PyQt6.QtWidgets import QApplication, QToolTip, QWidget
 
 import pet
 import theme
@@ -34,6 +31,9 @@ TOOL_BAND = TOOL_Y_GAP + TOOL_BTN + TOOL_PAD        # 28
 TOOL_MIN_W = 142
 # 工具条自己定的宽度：紧凑，不铺满正文窗口。正文窗口比它还窄就随窗宽。
 TOOL_BAND_W = 232
+
+# 浮窗落在面板下方的缝隙（面板贴底时翻到面板上方）
+TOOL_GAP_Y = 4
 
 PROGRESS_H = 15
 PROGRESS_PX = 11
@@ -57,28 +57,35 @@ TIPS = {
 
 
 class OneLineTools(QWidget):
-    """一行模式窗口底部那条悬浮工具带（绝对定位、hover 淡入）。
+    """一行模式面板正下方那颗独立悬浮工具带（绝对不是主窗子控件）。
 
     `state_fn()` -> `(playing: bool, prog: (pct, 章号, 共几章) | None)`，
     在 paintEvent 里现取：朗读状态、换句、翻章都不用外部记得来刷一次。
 
-    它不进布局：Reader 在 `_paint_one_line` 里调 `relayout()` 把它摆到
-    窗口底部居中位置，宽度取 `TOOL_BAND_W` 与窗口宽度的较小值。
+    它是独立浮窗：主窗在需要的时候调 `place_below(rect)` 把它摆到面板正下方
+    居中处，宽度取自身紧凑宽与面板宽的较小值。平时藏起来（透明 + 隐藏），
+    指上窗口才淡入，移开淡出。
     """
 
     triggered = pyqtSignal(str)
 
     def __init__(self, st, state_fn, parent=None) -> None:
+        # 挂到主窗下（Qt.Tool）只为「主窗藏/最小化时它跟着一起收」和「永远
+        # 浮在主窗上面」；它仍是独立顶层窗口，位置由 place_below 手动摆，
+        # 不会被主窗裁剪。
         super().__init__(parent)
         self.st = st
         self._state = state_fn
+        # 独立浮窗的规矩：不进任务栏、无边框、不抢焦点、真透明、弹出不夺焦
+        self.setWindowFlags(Qt.WindowType.Tool
+                            | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedHeight(TOOL_BAND)
         self.setMouseTracking(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # 平时藏在透明带里：不画、且鼠标穿透（从工具条上也能拖窗）
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setEnabled(False)          # 非一行模式彻底不参与
+        self.setEnabled(False)          # 非一行模式彻底不参与、也不显示
         self._alpha = 0.0
         self._wanted = False
         self._hover = ""
@@ -94,7 +101,7 @@ class OneLineTools(QWidget):
         self._grace.setSingleShot(True)
         self._grace.timeout.connect(self._on_grace)
 
-    # -------------------------------------------------- 布局
+    # -------------------------------------------------- 布局 / 摆位
 
     def layout_buttons(self) -> dict[str, QRect]:
         """左三贴左沿、右二贴右沿，中间那段留给进度标。"""
@@ -116,13 +123,18 @@ class OneLineTools(QWidget):
                 return k
         return ""
 
-    def relayout(self, parent_w: int, parent_h: int) -> None:
-        """摆到窗口底部居中，宽度取自身紧凑宽与父窗口宽的较小值。"""
+    def place_below(self, panel_rect: QRect) -> None:
+        """摆到面板正下方居中；面板贴屏幕底就翻到面板正上方。"""
         if not self.isEnabled():
             return
-        w = max(TOOL_MIN_W, min(TOOL_BAND_W, parent_w))
+        w = max(TOOL_MIN_W, min(TOOL_BAND_W, panel_rect.width()))
         self.setFixedSize(w, TOOL_BAND)
-        self.move((parent_w - w) // 2, parent_h - TOOL_BAND)
+        x = panel_rect.x() + (panel_rect.width() - w) // 2
+        screen = QApplication.primaryScreen().availableGeometry()
+        y = panel_rect.y() + panel_rect.height() + TOOL_GAP_Y
+        if y + TOOL_BAND > screen.bottom():
+            y = panel_rect.y() - TOOL_GAP_Y - TOOL_BAND
+        self.move(x, y)
 
     # -------------------------------------------------- 淡入淡出
 
@@ -131,9 +143,8 @@ class OneLineTools(QWidget):
             return
         self._wanted = True
         self._grace.stop()
-        if self._alpha <= 0.01:
-            self.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        if not self.isVisible():
+            self.show()
         self._start_tick()
 
     def fade_out(self) -> None:
@@ -161,8 +172,7 @@ class OneLineTools(QWidget):
             self._alpha = target
             self._tick.stop()
             if self._alpha <= 0.01:
-                self.setAttribute(
-                    Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                self.hide()             # 彻底透明就收起来，别挡鼠标
         self.update()
 
     # 自检用：跳过动画直接全亮，方便抓图比对
@@ -171,8 +181,8 @@ class OneLineTools(QWidget):
         self._alpha = 1.0
         self._grace.stop()
         self._tick.stop()
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        if not self.isVisible():
+            self.show()
         self.update()
 
     # -------------------------------------------------- 开关
@@ -182,14 +192,13 @@ class OneLineTools(QWidget):
         self.setEnabled(True)
 
     def suspend(self) -> None:
-        """退一行模式时调用：立刻收起、关掉动画、鼠标穿透。"""
+        """退一行模式时调用：立刻收起、关掉动画。"""
         self.setEnabled(False)
         self._wanted = False
         self._alpha = 0.0
         self._tick.stop()
         self._grace.stop()
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
         self.update()
 
     # -------------------------------------------------- 进度标
@@ -229,8 +238,8 @@ class OneLineTools(QWidget):
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setOpacity(self._alpha)
-            # 一条贯通全宽的圆角胶囊底：把按钮们包成一颗浮在正文下方的
-            # 独立小条，和正文之间留着 TOOL_BAND 的间隙，视觉上彻底脱离面板
+            # 一条贯通全宽的圆角胶囊底：把按钮们包成一颗浮在面板下方的
+            # 独立小条，和正文之间留着 TOOL_GAP_Y 的缝隙，视觉上彻底脱离面板
             cap = QRectF(1, 1, self.width() - 2, self.height() - 2)
             bg = QColor(self.st.get("colors.bg", "#0d0f12"))
             bg.setAlpha(max(1, min(255, int(self.st.get("bg_alpha", 236)))))
@@ -264,6 +273,19 @@ class OneLineTools(QWidget):
 
     # -------------------------------------------------- 鼠标
 
+    def enterEvent(self, ev) -> None:
+        if self.isEnabled():
+            self.fade_in()       # 指上胶囊本身就让它保持亮着
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._hover = ""
+        self._tip_timer.stop()
+        QToolTip.hideText()
+        if self.isEnabled():
+            self.fade_out()      # 离开胶囊：宽限后淡出（指回面板会被面板拦下）
+        super().leaveEvent(ev)
+
     def mouseMoveEvent(self, ev) -> None:
         pos = ev.position().toPoint()
         hit = self.tool_at(pos)
@@ -292,7 +314,7 @@ class OneLineTools(QWidget):
         if self._press:
             ev.accept()
         else:
-            # 空白处把事件还给主窗：从工具条上也能拖走这个窗口
+            # 空白处不接鼠标（独立浮窗，点到空白就是点到桌面/面板之间的缝）
             ev.ignore()
 
     def mouseReleaseEvent(self, ev) -> None:
@@ -302,10 +324,3 @@ class OneLineTools(QWidget):
             ev.accept()
         else:
             ev.ignore()
-
-    def leaveEvent(self, ev) -> None:
-        self._hover = ""
-        self._tip_timer.stop()
-        QToolTip.hideText()
-        self.update()
-        super().leaveEvent(ev)

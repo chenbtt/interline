@@ -44,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 69
+BUILD_VERSION = 70
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -138,6 +138,59 @@ class FrogButton(QPushButton):
             if not self.underMouse():
                 col.setAlpha(175)
             pet.draw_frog_head(p, self.rect().adjusted(3, 1, -3, -1), col)
+        finally:
+            p.end()
+
+    def enterEvent(self, ev):
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self.update()
+        super().leaveEvent(ev)
+
+
+class FootIconButton(QPushButton):
+    """底栏小按钮：把文字换成自绘单色图标（跟随主题前景色、hover 提亮）。
+
+    和 FrogButton 一个路子——图标自绘而不是 setIcon，底栏文字色是 QSS 按主题
+    给的，QIcon 不跟皮肤变色。图标线条复用 pet._tool_glyph，和奶蛙工具条同款。
+
+    kind：
+      "play"    朗读，随 听/停/续 在「播放三角 / 暂停双竖条」间切；
+      "font"    字号（一个 A）；
+      "oneline" 一行模式（单行文本框 + 一条线）。
+    """
+    def __init__(self, st, kind, parent=None):
+        super().__init__("", parent)
+        self.st = st
+        self.kind = kind
+        self.playing = False        # 朗读按钮：False=播/续，True=暂停
+        self.setObjectName("footBtn")
+
+    def set_playing(self, playing: bool) -> None:
+        if playing != self.playing:
+            self.playing = playing
+            self.update()
+
+    # 兼容旧代码里的 setText("听"/"停"/"续")：不显示文字，只换图标
+    def setText(self, text: str) -> None:
+        self.playing = (text == "停")
+        self.update()
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        p = QPainter(self)
+        try:
+            col = QColor(self.st.get("colors.fg", "#c3cbd6"))
+            if not self.underMouse():
+                col.setAlpha(175)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            r = self.rect()
+            side = min(r.width(), r.height())
+            box = QRect(r.center().x() - side // 2,
+                        r.center().y() - side // 2, side, side)
+            pet._tool_glyph(p, box, self.kind, col, self.playing)
         finally:
             p.end()
 
@@ -614,9 +667,9 @@ class Reader(QWidget):
         fl.addStretch(1)
 
         # 朗读与字号放右下角：顶栏只留管书的功能
-        self.btn_speak = QPushButton("听")
-        self.btn_font = QPushButton("Aa")
-        self.btn_oneline = QPushButton("单")
+        self.btn_speak = FootIconButton(self.st, "play")
+        self.btn_font = FootIconButton(self.st, "font")
+        self.btn_oneline = FootIconButton(self.st, "oneline")
         self.btn_pet = FrogButton(self.st)
         for b, w, tip in ((self.btn_speak, 24, "朗读（右键调语速和音色）"),
                           (self.btn_font, 28, "字号与行距"),
@@ -639,13 +692,12 @@ class Reader(QWidget):
         self.view_btn.setVisible(False)
         self.view_btn.clicked.connect(self._toggle_library_view)
         fl.addWidget(self.view_btn)
-        # 一行模式的悬浮工具带：绝对定位的浮层（不进布局），只有进一行模式
-        # 才激活。平时藏在窗口底部透明带里、鼠标穿透；指上窗口才淡入，
+        # 一行模式的悬浮工具带：v70 起是**独立浮窗**（不是主窗子控件），
+        # 落在一行模式面板正下方。只有进一行模式才激活；指上窗口才淡入，
         # 跟奶读气泡那排按钮的交互手感一致。
         self._one_line_tools = one_line_tools.OneLineTools(
             self.st, self._one_line_state, self)
         self._one_line_tools.triggered.connect(self._on_one_line_tool)
-        self._one_line_tools.installEventFilter(self)
         root.addWidget(self.footer)
 
         # 信号
@@ -685,6 +737,7 @@ class Reader(QWidget):
         self.btn_speak.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_speak.customContextMenuRequested.connect(self._speech_menu)
         self.speech.sentence_changed.connect(self._on_sentence)
+        self.speech.word_spoken.connect(self._on_word_spoken)
         self.speech.finished.connect(self._on_speech_finished)
         self.speech.state_changed.connect(self._on_speech_state)
         self.speech.notice.connect(lambda s: self._set_hint(s, 4000))
@@ -782,10 +835,9 @@ class Reader(QWidget):
                                 self._normal_geo.height())
                         return True
         # 一行模式：鼠标指上窗口淡入工具条，移开淡出（和奶读一致）。
-        # 工具条是窗口内的浮层子控件；从正文划到工具条不算「离开窗口」，
-        # 所以离开时还要确认光标确实出了窗口范围才淡出，免得自己闪自己。
-        if self._one_line and obj in (self.view, self.view.viewport(),
-                                      self._one_line_tools):
+        # 工具条 v70 起是独立浮窗，它自己管自己的 enter/leave；这里只负责
+        # 面板（正文）这边：指上窗口淡入，离开窗口且没落到工具条上才淡出。
+        if self._one_line and obj in (self.view, self.view.viewport()):
             t = ev.type()
             if t == QEvent.Type.Enter:
                 self._one_line_tools.fade_in()
@@ -806,16 +858,40 @@ class Reader(QWidget):
                         self._wheel_acc -= step
                         self._nudge_size(step)
                 return True
-            # 一行模式里只有一句，滚动没意义，滚轮改成翻句
+            # 一行模式：这一行超宽时，滚轮**先**横向滚它，滚到端点了**再**
+            # 翻句——下滚=前进=滚到最右才下一句，上滚=后退=滚到最左才上一句，
+            # 和键盘 ←/→ 横滚、↑/↓ 翻句的方向完全一致；内容没超宽（没有横滚条）
+            # 时滚轮直接翻句。
             if self._one_line:
+                # 正在朗读时滚轮：先暂停朗读（别让自动朗读和用户抢滚动）。
+                # 这一下只负责暂停，不再滚/翻句——下一次滚轮才正常导航。
+                if self.speech.running:
+                    self._pause_speech()
+                    return True
                 d = ev.angleDelta().y()
                 if not d:
-                    d = ev.pixelDelta().y() * 8
+                    d = ev.pixelDelta().y() * 8   # 触控板只给像素增量
                 if d:
                     self._wheel_acc += d / 120.0
                     step = int(self._wheel_acc)
                     if step:
                         self._wheel_acc -= step
+                        fwd = step < 0              # 下滚 = 前进
+                        sb = self.view.horizontalScrollBar()
+                        # 超宽才有横向滚动条：先滚它，到端点才翻句
+                        if sb.maximum() > 0:
+                            cur = sb.value()
+                            inc = max(40,
+                                      int(self.view.viewport().width() * 0.2))
+                            if fwd:
+                                if cur < sb.maximum():
+                                    sb.setValue(min(sb.maximum(), cur + inc))
+                                    return True
+                            else:
+                                if cur > sb.minimum():
+                                    sb.setValue(max(sb.minimum(), cur - inc))
+                                    return True
+                        # 没超宽、或已经滚到端点：滚轮直接翻句
                         self._step_one_line(-step)   # 上滚 = 上一句
                 return True
             # 非 Ctrl 必须放行，否则正文滚不动
@@ -1180,12 +1256,12 @@ class Reader(QWidget):
 
     def moveEvent(self, ev):
         if self._one_line:
-            self._one_line_tools.relayout(self.width(), self.height())
+            self._one_line_tools.place_below(self.geometry())
         super().moveEvent(ev)
 
     def resizeEvent(self, ev):
         if self._one_line:
-            self._one_line_tools.relayout(self.width(), self.height())
+            self._one_line_tools.place_below(self.geometry())
         super().resizeEvent(ev)
 
     def mousePressEvent(self, ev):
@@ -1227,6 +1303,9 @@ class Reader(QWidget):
         # 一行模式拖右下角改了宽度：把新宽度记下来，下次翻句保持固定
         if was_resizing and self._one_line:
             self._one_line_w = self.width()
+        # 拖完/缩放完，独立浮窗工具带跟着面板重新落位
+        if self._one_line:
+            self._one_line_tools.place_below(self.geometry())
         ev.accept()
 
     def wheelEvent(self, ev):
@@ -1253,6 +1332,10 @@ class Reader(QWidget):
         if self._pet and self._pet_window is not None and hide_pet:
             self._pet_window.suspend()
             self._pet_duck_end()
+        # 工具带是独立浮窗，主窗藏起来时它得跟着收（否则主窗没了还飘着一条）
+        band = getattr(self, "_one_line_tools", None)
+        if band is not None:
+            band.hide()
         self._persist()
         self.hide()
 
@@ -1805,23 +1888,30 @@ class Reader(QWidget):
             cur.clearSelection()
             self.view.setTextCursor(cur)
 
+    def _pause_speech(self) -> bool:
+        """「停」：记住念到哪个词，然后把引擎真正停掉。
+
+        正在念才动，返回是否真的停过。不用 pause()/resume()：实测 winrt 上
+        resume() 完全不出声（状态会变回 Speaking，但没有声音、也没有逐词回调），
+        连 1 秒的短暂停都恢复不了。只能停掉、之后从那个词重新开口。
+        """
+        if not self.speech.running:
+            return False
+        self._speech_pos, self._speech_char = self.speech.stop_at()
+        self._speech_paused = True
+        self.speech.stop()
+        self._clear_highlight()
+        self.btn_speak.setText("续")
+        # 引擎停掉时不一定会报状态回来，这里自己推一次：
+        # 奶蛙要切到「托腮等你」的姿势
+        self._pet_sync_base()
+        return True
+
     def _toggle_speech(self):
         if not self.book or not self._tts_sentences:
             return
         if self.speech.running:
-            # 「停」：记住念到哪个词，然后把引擎真正停掉。
-            #
-            # 不用 pause()/resume()：实测 winrt 上 resume() 完全不出声
-            # （状态会变回 Speaking，但没有声音、也没有逐词回调），
-            # 连 1 秒的短暂停都恢复不了。只能停掉、之后从那个词重新开口。
-            self._speech_pos, self._speech_char = self.speech.stop_at()
-            self._speech_paused = True
-            self.speech.stop()
-            self._clear_highlight()
-            self.btn_speak.setText("续")
-            # 引擎停掉时不一定会报状态回来，这里自己推一次：
-            # 奶蛙要切到「托腮等你」的姿势
-            self._pet_sync_base()
+            self._pause_speech()
         else:
             if self._speech_paused and self._speech_pos >= 0:
                 # 「续」：从停下的那个词接上。先换个新引擎——
@@ -1886,6 +1976,46 @@ class Reader(QWidget):
         # 句子索引重开就能精确回到原处
         if self.book_id:
             self.st.set_tts_progress(self.book_id, self.chapter_idx, idx)
+
+    def _on_word_spoken(self, idx: int, start: int, length: int):
+        """引擎念到某个词：一行模式下把横向滚动条跟到那个字上。
+
+        只在一行模式、且念的正是屏幕上这一句时滚——别的场景（正文阅读）
+        下面没有横向滚动条，滚了也没意义。
+        """
+        if self._one_line and idx == self._one_line_idx:
+            self._scroll_one_line_to_pos(start)
+
+    def _scroll_one_line_to_pos(self, pos: int):
+        """把一行模式那条横向细滚动条滚到「当前朗读的字」附近。
+
+        做法：算出这个字当前在视口里的横向位置，只有它要跑出舒适区
+        （左 12% ~ 右 72%）时才滚，且把它滚到离左边约 35% 处。这样
+        一句读下来是「跟着走、分段挪」，而不是每念一个字都抖一下。
+        """
+        if not self._one_line:
+            return
+        sb = self.view.horizontalScrollBar()
+        if sb.maximum() <= 0:              # 没超宽、滚不动
+            return
+        vp = self.view.viewport()
+        vw = vp.width()
+        if vw <= 0:
+            return
+        doc = self.view.document()
+        n = doc.characterCount()
+        if n <= 0:
+            return
+        cur = QTextCursor(doc)
+        cur.setPosition(max(0, min(pos, n - 1)))
+        r = self.view.cursorRect(cur)      # 视口坐标（已含当前滚动量）
+        lo = int(vw * 0.12)
+        hi = int(vw * 0.72)
+        if lo <= r.left() <= hi:           # 还在舒适区，别动，免得抖
+            return
+        doc_x = sb.value() + r.left()      # 该字在整行里的像素位置
+        target = doc_x - int(vw * 0.35)    # 滚到离左边约 35% 的位置
+        sb.setValue(max(sb.minimum(), min(sb.maximum(), target)))
 
     def _apply_highlights(self):
         """把各层高亮合并后一次性提交给 QTextEdit。"""
@@ -2095,10 +2225,10 @@ class Reader(QWidget):
         self.header.hide()
         self.footer.hide()
         self.search_bar.hide()
-        # 工具条是浮层：先激活（让它能接收鼠标、参与淡入），正文视口底部
-        # 留一条 TOOL_BAND 高的带给它浮着，正文最后一行就不会被压住
+        # 工具带是独立浮窗：先激活（允许显示、接收鼠标、参与淡入）。它不再
+        # 占本窗口的底部，所以正文视口只需上下留一点窄边距给那一行字透气
         self._one_line_tools.activate()
-        self.view.setViewportMargins(0, 0, 0, one_line_tools.TOOL_BAND)
+        self.view.setViewportMargins(0, 4, 0, 4)
         # 横向滚动条做细的样式只在一行模式铺上，退出时还原成常规态
         self.view.setStyleSheet(VIEW_ONELINE_SS)
         # 从朗读句起显示，而不是重新算——否则进来会跳一句
@@ -2205,10 +2335,8 @@ class Reader(QWidget):
         """
         if text is None:
             text = self._current_sentence_text()
-        cols = int(self.st.get("one_line.cols", 20))
         font = self._make_font(int(self.st.get("font.size",
                                                 store.DEFAULT_CONFIG["font"]["size"])))
-        fm = QFontMetrics(font)
 
         # 先定字体再换文本，确保这一句没有被上一次的字符格式带脏
         self.view.document().setDefaultFont(font)
@@ -2222,26 +2350,21 @@ class Reader(QWidget):
         self._hl_tts = None
         self._hl_search = []
 
-        # 高度交给文档自己算：单行模式只用一行，不同字号/行距下估算值会差一点
+        # 高度交给文档自己算：单行模式只用一行。v70 起工具带是独立浮窗、
+        # 不再占本窗口底部，所以这里只留那一行字 + 一圈窄内边距 + 底部
+        # 横向滚动条的 7px——面板就是一条矮矮的文字条，比之前矮一大截。
+        # （不留滚动条那 7px，超宽时细滚动条会把那一行字压掉一截）
         doc_h = self.view.document().size().height()
-        # 多出来的 TOOL_BAND 全给工具带：正文的可用高度跟从前一样，
-        # 最后一行不会被压掉
-        h = max(34, int(doc_h) + 14) + one_line_tools.TOOL_BAND
+        h = max(32, int(doc_h) + 20)
 
-        # 宽度：只在第一句（本会话）定一次，其余沿用当前宽度（可能已被拖拽改过）
+        # 宽度：默认取「普通面板」的宽度（进入一行模式前的窗口宽），只在本会话
+        # 第一句定一次，之后每句沿用（拖拽改过的也记着，点下一句不再变宽）
         if self._one_line_w is None:
-            unit = fm.horizontalAdvance("中")
-            pad = 28
-            screen = QApplication.primaryScreen().availableGeometry().width() - 80
-            # 按本章最长一句定默认宽：大多数句子都能在一行里看到，只有最长的
-            # 才走横滚；夹在 ONELINE_MIN_W..MAX_W 之间，进入时窗口稳定、
-            # 点下一句不再变宽
-            longest = max((fm.horizontalAdvance(s) for s in self._tts_sentences),
-                          default=0)
-            want = longest + pad
-            hi = unit * max(cols, 18) * 2 + pad
-            self._one_line_w = int(max(ONELINE_MIN_W,
-                                       min(want, hi, ONELINE_MAX_W, screen)))
+            screen = (QApplication.primaryScreen()
+                      .availableGeometry().width() - 80)
+            normal_geo = getattr(self, "_normal_geo", None)
+            normal_w = int(normal_geo.width()) if normal_geo else self.width()
+            self._one_line_w = int(max(ONELINE_MIN_W, min(normal_w, screen)))
             # 允许鼠标拖右下角改宽：只锁高度，宽度放开到屏幕量级
             self.setMinimumWidth(ONELINE_MIN_W)
             self.setMaximumWidth(screen + 80)
@@ -2251,8 +2374,8 @@ class Reader(QWidget):
         self.setFixedHeight(h)                      # 锁高度成「一条」的矮窗
         self.resize(self._one_line_w, h)            # 定宽（不锁宽，留给拖拽）
 
-        # 工具条浮层摆到窗口底部居中
-        self._one_line_tools.relayout(self.width(), self.height())
+        # 工具带是独立浮窗：摆到面板正下方居中，跟着窗口走
+        self._one_line_tools.place_below(self.geometry())
         # 横向：内容超宽才出细滚动条（样式在 _enter_one_line 里铺好）；
         # 纵向：一条字幕不需要竖条，多出来的那几个像素会挤出一条不能拖的条
         self.view.setHorizontalScrollBarPolicy(
@@ -2765,6 +2888,10 @@ class Reader(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+        # 一行模式下主窗被藏过，工具带也一起藏了，唤回来时重新亮起来
+        if self._one_line:
+            self._one_line_tools.place_below(self.geometry())
+            self._one_line_tools.fade_in()
         if self._pet and self._pet_window is not None:
             self._pet_window.resume()
             # 刚从托盘/热键/二次启动唤起来，让奶蛙打个招呼
