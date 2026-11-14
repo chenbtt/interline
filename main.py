@@ -44,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 70
+BUILD_VERSION = 71
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -3341,6 +3341,145 @@ def updatecheck() -> int:
     return rc
 
 
+def restartcheck() -> int:
+    """端到端验证「更新后自动重启」这条链路，用 exe 的副本跑，不碰正在用的那份。
+
+    走的和真实更新完全同一条路：生成脚本 → move 覆盖 → 等旧 PID 消失 →
+    独立 TEMP 启动 → 新进程写 marker 回执。唯一区别是被启动的那份带着
+    INTERLINE_RESTART_PROBE，写完 marker 立刻退出，不会把界面拉起来。
+
+    为什么值得单独有这么个检查：这条链路的失败是「更新成功了、但程序起不来」
+    ——用户看到的是一句 python313.dll 加载失败，实际情况是旧进程清理 _MEI
+    目录时把新进程解压出来的 DLL 一起删了。这种时序问题在源码模式下根本
+    复现不了，只有打包版 + 真替换才暴露。
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    import time
+
+    lines: list[str] = []
+    out = Path(tempfile.gettempdir()) / "interline_restartcheck.txt"
+
+    def log(msg: str):
+        lines.append(str(msg))
+        try:
+            out.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    def finish(code: int, msg: str) -> int:
+        log(f"RESULT    = {msg}")
+        try:
+            out.write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+        return code
+
+    if not getattr(sys, "frozen", False):
+        log("skip      = 源码运行，没有 exe 可测")
+        return finish(0, "SKIP (not frozen)")
+
+    import updater
+
+    exe = Path(sys.executable)
+    work = Path(tempfile.gettempdir()) / "interline_restartcheck"
+    try:
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log(f"error     = 无法准备目录：{e}")
+        return finish(2, "FAIL")
+
+    target = work / "target.exe"
+    new = work / "new.exe"
+    marker = work / "marker.txt"
+    try:
+        shutil.copy2(exe, target)
+        shutil.copy2(exe, new)
+    except Exception as e:
+        log(f"error     = 复制 exe 失败：{e}")
+        return finish(2, "FAIL")
+
+    log(f"version   = {BUILD_VERSION}")
+    log(f"exe       = {exe} ({exe.stat().st_size} B)")
+    log(f"work      = {work}")
+
+    script = updater.build_script(new, target, old_pid=0, marker=marker)
+    cmd_file = work / "u.cmd"
+    try:
+        cmd_file.write_text(script, encoding="gbk")
+    except Exception as e:
+        log(f"error     = 写脚本失败：{e}")
+        return finish(2, "FAIL")
+
+    # 脚本自己会设 marker；这里只需要告诉新进程「你是探针，写完就退」
+    env = dict(os.environ)
+    env.pop("INTERLINE_RESTART_MARKER", None)
+    env["INTERLINE_RESTART_PROBE"] = "1"
+    try:
+        subprocess.Popen(["cmd", "/c", str(cmd_file)],
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS",
+                                               0x00000008),
+                         env=env, close_fds=True)
+    except Exception as e:
+        log(f"error     = 拉起脚本失败：{e}")
+        return finish(2, "FAIL")
+
+    t0 = time.time()
+    while time.time() - t0 < 45:
+        if marker.exists():
+            break
+        time.sleep(0.3)
+    elapsed = time.time() - t0
+    log(f"elapsed   = {elapsed:.1f}s")
+
+    if not marker.exists():
+        log("marker    = 缺失（新进程没能起来）")
+        log_file = Path(os.environ.get("LOCALAPPDATA", ".")) / "Interline" / "update_log.txt"
+        try:
+            log("--- update_log.txt ---")
+            for ln in log_file.read_text(encoding="gbk",
+                                         errors="replace").splitlines()[-12:]:
+                log(f"  {ln}")
+        except Exception as e:
+            log(f"  （读不到更新日志：{e}）")
+        return finish(2, "FAIL 新进程没有回执")
+
+    content = marker.read_text(encoding="utf-8", errors="replace")
+    info = {}
+    for ln in content.splitlines():
+        if "=" in ln:
+            k, _, v = ln.partition("=")
+            info[k.strip()] = v.strip()
+    log(f"marker    = {len(content)} B")
+    for k in ("pid", "TEMP", "MEIPASS"):
+        log(f"  {k:<8}= {info.get(k, '')}")
+
+    problems = []
+    # 1) 替换真的发生了：target 和 new 已经是同一份新包
+    if new.exists():
+        problems.append("new.exe 没被移走，替换没发生")
+    try:
+        if target.stat().st_size != exe.stat().st_size:
+            problems.append("target 大小和新包不一致")
+    except Exception as e:
+        problems.append(f"target 读不到：{e}")
+    # 2) TEMP 隔离生效：这是躲开 _MEI 撞名的关键
+    meipass = info.get("MEIPASS", "")
+    if "\\Interline\\run\\" not in meipass:
+        problems.append(f"TEMP 没隔离，MEIPASS 落在 {meipass or '（空）'}")
+    # 3) 起来的是另一个进程，不是把当前这个当成回执
+    if info.get("pid") and info.get("pid") == str(os.getpid()):
+        problems.append("marker 是当前进程写的，不是新进程")
+
+    if problems:
+        for p in problems:
+            log(f"problem   = {p}")
+        return finish(2, "FAIL")
+    return finish(0, "OK")
+
+
 def petcheck() -> int:
     """打包后验证奶蛙的像素路径：切帧 + 画一张「气泡 + 蛙」出来。
 
@@ -4692,6 +4831,24 @@ def install_excepthook(get_win):
 
 
 def main():
+    # 更新脚本的「握手」：它启动新 exe 后等这个文件出现，出现才算重启成功。
+    # 必须放在 main() 最前面——能跑到这里，就说明 PyInstaller 解压成功、
+    # python313.dll 也加载上了，正是外面想知道的那件事。
+    _marker = os.environ.get("INTERLINE_RESTART_MARKER", "")
+    if _marker:
+        try:
+            mp = Path(_marker)
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            mp.write_text(
+                f"pid={os.getpid()}\n"
+                f"TEMP={os.environ.get('TEMP', '')}\n"
+                f"MEIPASS={getattr(sys, '_MEIPASS', '')}\n"
+                f"EXE={sys.executable}\n", encoding="utf-8")
+        except Exception:
+            pass
+        # --restartcheck 用：写完就退，别真的把界面拉起来
+        if os.environ.get("INTERLINE_RESTART_PROBE"):
+            return 0
     if "--envdump" in sys.argv:
         # 排查「更新后重启报 python DLL」专用：把启动时看到的 TEMP / 解包目录写出来
         i = sys.argv.index("--envdump")
@@ -4715,6 +4872,8 @@ def main():
         return edgecheck()
     if "--toolcheck" in sys.argv:
         return toolcheck()
+    if "--restartcheck" in sys.argv:
+        return restartcheck()
     if "--voicecheck" in sys.argv:
         return voicecheck()
     if "--updatecheck" in sys.argv:

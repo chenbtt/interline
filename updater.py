@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -242,45 +243,112 @@ class Downloader(QObject):
             pass
 
 
-def build_script(new_exe: Path, target: Path) -> str:
+def build_script(new_exe: Path, target: Path, old_pid: int = 0,
+                 marker: Path | None = None) -> str:
     """生成替换脚本。单独拆出来是为了能测，不必真的覆盖 exe。
 
-    运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。重试上限 600 次
+    运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。move 重试上限 600 次
     （每次忙等约 0.2s，约两分钟），避免进程一直不退时脚本死循环。
 
-    三个必须处理的坑：
+    四个必须处理的坑：
     1. **不能用 ping 当延时器**。原来的写法是 `ping 127.0.0.1 -n 4`，但有些
        机器上回环 ping 会 100% 超时（实测某台 Win11），每个包要等满超时，
        脚本会卡十几秒才往下走。现在改成纯 CPU 忙等（for /l），不碰网络，
        也不会弹出控制台窗口。
     2. **用 move /y 直接覆盖，失败就重试**。同卷是重命名，瞬间完成，不会留
-       下写了一半的 exe；旧进程还占着文件时 move 必失败，一直重试到成功，
-       天然起到「等旧进程把 exe 释放 / 退出」的作用，不用盲猜等几秒。
-    3. **每次给新进程一个全新的 TEMP 子目录**。PyInstaller onefile 把文件
-       解压到 %TEMP%\\_MEIxxxxxx 再加载 python3xx.dll，目录名按秒级种子生成。
-       更新完立刻启动时，新旧进程可能撞上同一个目录名，旧进程退出时正在删
-       它 —— 新进程就报「Failed to load Python DLL」。用 run\\<随机> 让每次
-       启动都落在不同目录，从物理上杜绝撞名（哪怕时序重叠也没关系）。
+       下写了一半的 exe；旧进程还占着文件时 move 必失败，一直重试到成功。
+    3. **move 成功 ≠ 旧进程收工**。文件句柄一放，move 就过了，但 PyInstaller
+       的父引导进程还要删掉自己的 %TEMP%\\_MEIxxxxxx。`_MEI` 名字里带 pid，
+       新旧进程一旦撞上同一个 pid，新进程刚解压出来的 python3xx.dll 就被
+       旧进程的清理删掉 —— 报「Failed to load Python DLL」。所以拿到旧 PID
+       之后要**显式等它从 tasklist 里消失**，别赌时序。
+    4. **每次给新进程一个全新的 TEMP 子目录**，从物理上避开撞名；并且启动
+       后用 marker 文件**握手确认新进程真的活着**，没活着就再启动一次（最多
+       3 次）。前面几条都是「尽量不出错」，这条是「错了也能自己爬起来」。
+
+    marker 由 app 在 main() 最开头写（早于任何 Qt 初始化），所以它存在就
+    等价于「解压 + 加载 python 都成功了」。
     """
+    log = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Interline"
+    log = log / "update_log.txt"
+    mp = str(marker) if marker else str(log.parent / "restart.marker")
+
+    waitpid = ""
+    if old_pid:
+        # 注意：这里刻意不用 find / findstr 判 PID —— 如果用户的 PATH 里有
+        # Git/MSYS 的 Unix find，cmd 会优先命中它（实测在 Git Bash 里启动的
+        # 进程，PATH 带着 usr\bin），判断直接失效。改用 tasklist 绝对路径 +
+        # for /f 取第 2 个逗号字段，纯内置、不受 PATH 影响。
+        waitpid = f"""rem 等旧进程彻底消失（含 PyInstaller 清理 _MEI 目录），最多约 60s
+set "SYS=%SystemRoot%\\System32"
+if not exist "%SYS%\\tasklist.exe" set "SYS=C:\\Windows\\System32"
+set /a w=0
+:waitloop
+set "ALIVE="
+for /f "tokens=2 delims=," %%B in ('"%SYS%\\tasklist.exe" /fi "PID eq {old_pid}" /nh /fo csv 2^>nul') do if "%%B"=="{old_pid}" set "ALIVE=1"
+if not defined ALIVE goto launch0
+call :nap
+set /a w+=1
+if %w% lss 300 goto waitloop
+"""
+    else:
+        waitpid = "rem 没拿到旧 PID，跳过等待\n"
+
     return f"""@echo off
 setlocal
+set "NEW={new_exe}"
+set "TARGET={target}"
+set "MARKER={mp}"
+set "LOG={log}"
+if not exist "{log.parent}" mkdir "{log.parent}" >nul 2>&1
 set /a n=0
+
 :retry
-move /y "{new_exe}" "{target}" >nul 2>&1
+move /y "%NEW%" "%TARGET%" >nul 2>&1
 rem 新包被移走 = 替换成功；仍存在说明旧进程还占着 exe，继续等
-if not exist "{new_exe}" goto done
+if not exist "%NEW%" goto moved
 set /a n+=1
-if %n% geq 600 exit /b 1
+if %n% geq 600 goto bail
 call :nap
 goto retry
-:done
+
+:bail
+echo [%DATE% %TIME%] target locked, give up >> "%LOG%"
+del "%~f0"
+exit /b 1
+
+:moved
+echo [%DATE% %TIME%] moved ok >> "%LOG%"
+{waitpid}
+:launch0
+set /a tries=0
+
+:launch
 rem 每次全新 TEMP 子目录，彻底避开 PyInstaller 的 _MEI 目录撞名
 set "TEMP=%LOCALAPPDATA%\\Interline\\run\\%RANDOM%%RANDOM%"
 set "TMP=%TEMP%"
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1
-start "" "{target}"
+del "%MARKER%" >nul 2>&1
+echo [%DATE% %TIME%] launch try=%tries% TEMP=%TEMP% >> "%LOG%"
+set "INTERLINE_RESTART_MARKER=%MARKER%"
+start "" "%TARGET%"
+
+rem 等新进程写回 marker：写出来了 = 解压 + 加载 python 都成功
+set /a s=0
+:waitmark
+if exist "%MARKER%" goto ok
+call :nap
+set /a s+=1
+if %s% lss 90 goto waitmark
+set /a tries+=1
+if %tries% lss 3 goto launch
+echo [%DATE% %TIME%] marker timeout, give up >> "%LOG%"
+
+:ok
+echo [%DATE% %TIME%] done >> "%LOG%"
 del "%~f0"
 exit /b 0
+
 :nap
 rem 约 0.2s 忙等；不依赖 ping / timeout，无控制台也能跑
 for /l %%i in (1,1,400000) do rem
@@ -296,13 +364,19 @@ def install_and_restart(new_exe: Path) -> bool:
         return False
     script = Path(tempfile.gettempdir()) / "interline_update.cmd"
     try:
-        script.write_text(build_script(new_exe, target), encoding="gbk")
+        script.write_text(build_script(new_exe, target, os.getpid()),
+                          encoding="gbk")
         # 只传 DETACHED_PROCESS：无控制台，且父进程（旧 exe）退出后脚本仍能继续跑。
         # 之前和 CREATE_NO_WINDOW 一起传，MSDN 明确说两者不能合用（语义冲突），
         # 实测偶尔会弹出可见的 cmd 窗口。
+        # 显式构造 env：摘掉「重启握手」用的两个变量，否则新进程会被当成探针
+        # 直接退出（只有 --restartcheck 才该带它们）。
+        env = dict(os.environ)
+        env.pop("INTERLINE_RESTART_MARKER", None)
+        env.pop("INTERLINE_RESTART_PROBE", None)
         flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         subprocess.Popen(["cmd", "/c", str(script)],
-                         creationflags=flags, close_fds=True)
+                         creationflags=flags, env=env, close_fds=True)
         return True
     except Exception:
         return False

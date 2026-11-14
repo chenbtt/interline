@@ -141,6 +141,17 @@ tts-cache/     在线音色 MP3 缓存（按 文本+音色+语速 哈希）
 
 带 U 盘走就加 `--portable`，数据存 exe 同级的 `InterlineData\`。
 
+## 在线更新
+
+「设置 → 检查更新」直接下载新 exe 并替换自身，然后重启。
+
+运行中的 exe 不能被覆盖，所以替换只能在外部脚本里做。这条链路有两个坑，都写在 `updater.build_script()` 的注释里：
+
+- `move` 覆盖成功只代表旧进程**放开了文件句柄**，不代表它收工了。PyInstaller 单文件版的父引导还要删自己的 `%TEMP%\_MEI<pid>`，而目录名带 PID——PID 被新进程立刻复用，就会把新进程刚解压的 `python313.dll` 一起删掉，报 `Failed to load Python DLL`。
+- 所以脚本会：拿到旧 PID 后 `tasklist` 轮询到它消失 → 用全新 TEMP 子目录启动 → 等新进程写 marker 回执，没等到就再启动一次（最多 3 次）。
+
+全过程记在 `%LOCALAPPDATA%\Interline\update_log.txt`。打包版可用 `Interline.exe --restartcheck` 端到端验证这条链路（用 exe 副本跑，不动正在用的那份）。
+
 ## 致谢
 
 - 奶蛙精灵图：[timerring/codex-pet-naiwa](https://github.com/timerring/codex-pet-naiwa)（MIT），中间帧由图像模型在该素材上生成，同按 MIT 使用
