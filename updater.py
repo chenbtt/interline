@@ -257,11 +257,13 @@ def build_script(new_exe: Path, target: Path, old_pid: int = 0,
        也不会弹出控制台窗口。
     2. **用 move /y 直接覆盖，失败就重试**。同卷是重命名，瞬间完成，不会留
        下写了一半的 exe；旧进程还占着文件时 move 必失败，一直重试到成功。
-    3. **move 成功 ≠ 旧进程收工**。文件句柄一放，move 就过了，但 PyInstaller
+       3. **move 成功 ≠ 旧进程收工**。文件句柄一放，move 就过了，但 PyInstaller
        的父引导进程还要删掉自己的 %TEMP%\\_MEIxxxxxx。`_MEI` 名字里带 pid，
        新旧进程一旦撞上同一个 pid，新进程刚解压出来的 python3xx.dll 就被
        旧进程的清理删掉 —— 报「Failed to load Python DLL」。所以拿到旧 PID
        之后要**显式等它从 tasklist 里消失**，别赌时序。
+       注意 old_pid 该传**父引导的 pid**（onefile 的父比子后死、_MEI 也是它删的），
+       传跑 Python 的那个子进程 pid 基本等于没等。
     4. **每次给新进程一个全新的 TEMP 子目录**，从物理上避开撞名；并且启动
        后用 marker 文件**握手确认新进程真的活着**，没活着就再启动一次（最多
        3 次）。前面几条都是「尽量不出错」，这条是「错了也能自己爬起来」。
@@ -322,7 +324,7 @@ del "%~f0"
 exit /b 1
 
 :moved
-echo [%DATE% %TIME%] moved ok >> "%LOG%"
+echo [%DATE% %TIME%] moved ok, wait_pid={old_pid} >> "%LOG%"
 {waitpid}
 :launch0
 set /a tries=0
@@ -367,9 +369,20 @@ def install_and_restart(new_exe: Path) -> bool:
     target = Path(sys.executable)
     if not new_exe.exists():
         return False
+    # onefile 在 Windows 上是「父引导 + 子进程」两段：子进程才是跑 Python 的
+    # 那一个（os.getpid()），而解压目录 _MEI 是父引导收尾时删的，父比子后死。
+    # 所以等父 PID 才有意义 —— 等自己等于什么都没等。
+    wait_pid = os.getpid()
+    if getattr(sys, "_MEIPASS", ""):
+        try:
+            ppid = os.getppid()
+        except Exception:
+            ppid = 0
+        if ppid and ppid != os.getpid():
+            wait_pid = ppid
     script = Path(tempfile.gettempdir()) / "interline_update.cmd"
     try:
-        script.write_text(build_script(new_exe, target, os.getpid()),
+        script.write_text(build_script(new_exe, target, wait_pid),
                           encoding="gbk")
         # 只传 DETACHED_PROCESS：无控制台，且父进程（旧 exe）退出后脚本仍能继续跑。
         # 之前和 CREATE_NO_WINDOW 一起传，MSDN 明确说两者不能合用（语义冲突），

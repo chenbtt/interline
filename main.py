@@ -4846,9 +4846,18 @@ def main():
                 f"EXE={sys.executable}\n", encoding="utf-8")
         except Exception:
             pass
-        # --restartcheck 用：写完就退，别真的把界面拉起来
-        if os.environ.get("INTERLINE_RESTART_PROBE"):
-            return 0
+    # 探针模式：只写回执就退，绝不把界面拉起来。**必须和 _marker 分开判断**——
+    # 压测时故意不给 marker（要拿它当「旧进程」占住 exe），一旦嵌在 if _marker
+    # 里面就会退化成正常启动，把窗口弹出来、还把 exe 锁住，move 只能一直重试。
+    if os.environ.get("INTERLINE_RESTART_PROBE"):
+        # 压测用：让探针在解压目录里多待几秒，好让更新脚本去等**真正的父引导
+        # 进程**（onefile 的父比子后死、_MEI 也是它删的），顺便把「exe 被占用
+        # → move 重试」那段也一起跑到。
+        try:
+            time.sleep(float(os.environ.get("INTERLINE_PROBE_SLEEP", "0")))
+        except Exception:
+            pass
+        return 0
     if "--envdump" in sys.argv:
         # 排查「更新后重启报 python DLL」专用：把启动时看到的 TEMP / 解包目录写出来
         i = sys.argv.index("--envdump")
@@ -4858,6 +4867,8 @@ def main():
                 with open(out, "w", encoding="utf-8") as f:
                     f.write(f"TEMP={os.environ.get('TEMP', '')}\n")
                     f.write(f"TMP={os.environ.get('TMP', '')}\n")
+                    f.write(f"PID={os.getpid()}\n")
+                    f.write(f"PPID={os.getppid()}\n")
                     f.write(f"MEIPASS={getattr(sys, '_MEIPASS', '')}\n")
                     f.write(f"EXE={sys.executable}\n")
                     f.write(f"FROZEN={getattr(sys, 'frozen', False)}\n")
