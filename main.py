@@ -44,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 72
+BUILD_VERSION = 73
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
@@ -4846,6 +4846,19 @@ def main():
                 f"EXE={sys.executable}\n", encoding="utf-8")
         except Exception:
             pass
+        # 另写一份「我确实跑起来了」的启动记录。和 marker 分开放，是为了能把
+        # 两种失败分开：「app 压根没到 Python」（两个文件都没有）和
+        # 「app 起来了但 marker 没被脚本看到」（有 boot_log 没 marker）。
+        try:
+            bl = Path(os.environ.get("INTERLINE_BOOT_LOG", "")
+                      or str(Path(_marker).with_name("boot_log.txt")))
+            bl.parent.mkdir(parents=True, exist_ok=True)
+            with open(bl, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} boot pid={os.getpid()} "
+                        f"marker={_marker} TEMP={os.environ.get('TEMP', '')} "
+                        f"MEIPASS={getattr(sys, '_MEIPASS', '')}\n")
+        except Exception:
+            pass
     # 探针模式：只写回执就退，绝不把界面拉起来。**必须和 _marker 分开判断**——
     # 压测时故意不给 marker（要拿它当「旧进程」占住 exe），一旦嵌在 if _marker
     # 里面就会退化成正常启动，把窗口弹出来、还把 exe 锁住，move 只能一直重试。
@@ -4858,6 +4871,22 @@ def main():
         except Exception:
             pass
         return 0
+    if "--simupdate" in sys.argv:
+        # 开发用：从命令行直接走一次真实的「替换 + 重启」，方便复现更新问题。
+        # INTERLINE_SIMUPDATE_DELAY 秒数先空转一会儿，模拟「应用正在运行」，
+        # 好让脚本的 move 重试那段也走到。
+        i = sys.argv.index("--simupdate")
+        src = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        try:
+            delay = float(os.environ.get("INTERLINE_SIMUPDATE_DELAY", "0"))
+        except Exception:
+            delay = 0.0
+        if delay > 0:
+            time.sleep(delay)
+        if getattr(sys, "frozen", False) and src:
+            import updater
+            return 0 if updater.install_and_restart(Path(src)) else 3
+        return 4
     if "--envdump" in sys.argv:
         # 排查「更新后重启报 python DLL」专用：把启动时看到的 TEMP / 解包目录写出来
         i = sys.argv.index("--envdump")

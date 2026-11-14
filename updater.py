@@ -306,7 +306,11 @@ set "NEW={new_exe}"
 set "TARGET={target}"
 set "MARKER={mp}"
 set "LOG={log}"
+rem 先记住继承来的 TEMP，最后一次尝试要用原值退回默认解压目录
+set "ORIG_TEMP=%TEMP%"
+set "ORIG_TMP=%TMP%"
 if not exist "{log.parent}" mkdir "{log.parent}" >nul 2>&1
+echo [%DATE% %TIME%] script start wait_pid={old_pid} marker="%MARKER%" >> "%LOG%"
 set /a n=0
 
 :retry
@@ -330,12 +334,23 @@ echo [%DATE% %TIME%] moved ok, wait_pid={old_pid} >> "%LOG%"
 set /a tries=0
 
 :launch
-rem 每次全新 TEMP 子目录，彻底避开 PyInstaller 的 _MEI 目录撞名
+if %tries% geq 2 goto plain
+rem 前两次：全新 TEMP 子目录，彻底避开 PyInstaller 的 _MEI 目录撞名
 set "TEMP=%LOCALAPPDATA%\\Interline\\run\\%RANDOM%%RANDOM%"
 set "TMP=%TEMP%"
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1
+goto startit
+
+:plain
+rem 最后一次退回继承来的默认 TEMP：万一隔离目录本身在那台机器上有问题
+rem （杀软、权限、盘符），至少和手动双击是同一条路。旧进程这时已确认退干净，
+rem 撞名风险本来就小，能起来比「讲究」重要。
+set "TEMP=%ORIG_TEMP%"
+set "TMP=%ORIG_TMP%"
+
+:startit
 del "%MARKER%" >nul 2>&1
-echo [%DATE% %TIME%] launch try=%tries% TEMP=%TEMP% >> "%LOG%"
+echo [%DATE% %TIME%] launch try=%tries% TEMP="%TEMP%" >> "%LOG%"
 set "INTERLINE_RESTART_MARKER=%MARKER%"
 start "" "%TARGET%"
 
@@ -347,6 +362,7 @@ if exist "%MARKER%" goto ok
 call :nap
 set /a s+=1
 if %s% lss 200 goto waitmark
+echo [%DATE% %TIME%] marker timeout on try=%tries% >> "%LOG%"
 set /a tries+=1
 if %tries% lss 3 goto launch
 echo [%DATE% %TIME%] marker timeout, give up >> "%LOG%"
