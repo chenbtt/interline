@@ -244,7 +244,7 @@ class Downloader(QObject):
 
 
 def build_script(new_exe: Path, target: Path, old_pid: int = 0,
-                 marker: Path | None = None) -> str:
+                 marker: Path | None = None, log: Path | None = None) -> str:
     """生成替换脚本。单独拆出来是为了能测，不必真的覆盖 exe。
 
     运行中的 exe 不能被覆盖，所以只能退到外部脚本里做。move 重试上限 600 次
@@ -268,9 +268,13 @@ def build_script(new_exe: Path, target: Path, old_pid: int = 0,
 
     marker 由 app 在 main() 最开头写（早于任何 Qt 初始化），所以它存在就
     等价于「解压 + 加载 python 都成功了」。
+
+    log 默认写 %LOCALAPPDATA%\\Interline\\update_log.txt；压测时传别的路径，
+    免得把用户那份日志刷成一堆测试记录。
     """
-    log = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Interline"
-    log = log / "update_log.txt"
+    if log is None:
+        log = (Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+               / "Interline" / "update_log.txt")
     mp = str(marker) if marker else str(log.parent / "restart.marker")
 
     waitpid = ""
@@ -334,12 +338,13 @@ set "INTERLINE_RESTART_MARKER=%MARKER%"
 start "" "%TARGET%"
 
 rem 等新进程写回 marker：写出来了 = 解压 + 加载 python 都成功
+rem 每轮约 20s（200 × 0.1s）：慢盘解压 64MB 单文件也要命，给够余量
 set /a s=0
 :waitmark
 if exist "%MARKER%" goto ok
 call :nap
 set /a s+=1
-if %s% lss 90 goto waitmark
+if %s% lss 200 goto waitmark
 set /a tries+=1
 if %tries% lss 3 goto launch
 echo [%DATE% %TIME%] marker timeout, give up >> "%LOG%"

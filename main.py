@@ -44,7 +44,7 @@ from theme import SKIN_NAMES, SKIN_ORDER, SKINS
 
 APP_TITLE = "Interline"
 # 每次迭代 +1，与服务器 version.json 对应；打包时写进 exe 的产品版本
-BUILD_VERSION = 71
+BUILD_VERSION = 72
 SERVER_KEY = "Interline.SingleInstance.v1"
 # 朗读中奶蛙隔多久随机来一个小动作（ms）。一句通常 3-6 秒，
 # 8-15 秒大约是每两三句一个，不至于一直在动
